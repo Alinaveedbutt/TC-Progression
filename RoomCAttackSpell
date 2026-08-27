@@ -1,0 +1,260 @@
+-- TrialChamberSpellBridge.lua
+-- Minimal server-authoritative spell cast for Room C mote weakening.
+-- Place as ModuleScript (or Script) under ServerScriptService.
+--
+-- Designed to be replaced later by the real player spell system:
+--   _G.TrialSpell.onSpellHitMote(motePart, player, amount)
+--   _G.TrialSpell.castTowardLook(player)
+--   _G.TrialSpell.ensureSpellTool(player)
+
+local Players = game:GetService("Players")
+local CollectionService = game:GetService("CollectionService")
+local Workspace = game:GetService("Workspace")
+local Debris = game:GetService("Debris")
+
+------------------------------------------------------------------------
+-- Configurable balance (Room C ~1 minute encounter)
+------------------------------------------------------------------------
+local CONFIG = {
+	TOOL_NAME = "TrialArcaneFocus",
+	SPELL_COOLDOWN = 0.55,
+	SPELL_RANGE = 70,
+	SPELL_HIT_RADIUS = 5.5,
+	SPELL_WEAKNESS = 10, -- per successful mote hit; 6 motes * 100 / 10 ~= 60 casts
+	VISUAL_COLOR = Color3.fromRGB(180, 230, 255),
+	ATTR_HAS_SPELL = "HasTrialArcaneSpell",
+}
+
+local castCooldown = {} -- [userId] = os.clock()
+
+local function findMoteFromPart(part)
+	local current = part
+	while current and current ~= Workspace do
+		if current:IsA("BasePart") and CollectionService:HasTag(current, "RoomCBlueMote") then
+			if current:GetAttribute("Dissolved") ~= true then
+				return current
+			end
+		end
+		current = current.Parent
+	end
+	return nil
+end
+
+local function applyWeaknessToMote(mote, player, amount)
+	if not mote or not mote.Parent then
+		return false
+	end
+	if mote:GetAttribute("Dissolved") == true then
+		return false
+	end
+
+	local maxW = mote:GetAttribute("MaxWeakness") or 100
+	local cur = mote:GetAttribute("Weakness") or 0
+	local nextW = math.min(maxW, cur + amount)
+	mote:SetAttribute("Weakness", nextW)
+
+	local pct = math.floor((nextW / maxW) * 100 + 0.5)
+	print("[ROOM C] Mote spell hit (" .. mote.Name .. ")")
+	-- Milestone logs only
+	if pct >= 35 and (cur / maxW) * 100 < 35 then
+		print("[ROOM C] Mote weakness: 35% (" .. mote.Name .. ")")
+	elseif pct >= 75 and (cur / maxW) * 100 < 75 then
+		print("[ROOM C] Mote weakness: 75% (" .. mote.Name .. ")")
+	elseif nextW >= maxW then
+		print("[ROOM C] Mote weakness: 100% (" .. mote.Name .. ")")
+	end
+
+	if typeof(_G.RoomCMoteEncounter) == "table" and type(_G.RoomCMoteEncounter.onWeaknessChanged) == "function" then
+		_G.RoomCMoteEncounter.onWeaknessChanged(mote, nextW, maxW, player)
+	end
+
+	return true
+end
+
+local function spawnCastVisual(origin, targetPos)
+	local dist = (targetPos - origin).Magnitude
+	if dist < 0.5 then
+		return
+	end
+
+	local beamPart = Instance.new("Part")
+	beamPart.Name = "TrialSpellBolt"
+	beamPart.Anchored = true
+	beamPart.CanCollide = false
+	beamPart.CanTouch = false
+	beamPart.CanQuery = false
+	beamPart.Material = Enum.Material.Neon
+	beamPart.Color = CONFIG.VISUAL_COLOR
+	beamPart.Size = Vector3.new(0.35, 0.35, dist)
+	beamPart.CFrame = CFrame.lookAt(origin, targetPos) * CFrame.new(0, 0, -dist / 2)
+	beamPart.Transparency = 0.15
+	beamPart.Parent = Workspace
+	Debris:AddItem(beamPart, 0.18)
+
+	local light = Instance.new("PointLight")
+	light.Color = CONFIG.VISUAL_COLOR
+	light.Brightness = 2
+	light.Range = 12
+	light.Parent = beamPart
+end
+
+local function castTowardLook(player)
+	if not player then
+		return false
+	end
+
+	local now = os.clock()
+	local last = castCooldown[player.UserId]
+	if last and (now - last) < CONFIG.SPELL_COOLDOWN then
+		return false
+	end
+
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not hrp or not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	castCooldown[player.UserId] = now
+
+	local origin = hrp.Position + Vector3.new(0, 1.5, 0)
+	local look = hrp.CFrame.LookVector
+	local endPos = origin + look * CONFIG.SPELL_RANGE
+
+	-- Sample along look ray for mote hits (server authoritative, dodge-friendly aim)
+	local hitMote = nil
+	local hitPos = endPos
+	local steps = 14
+	for i = 1, steps do
+		local t = i / steps
+		local sample = origin:Lerp(endPos, t)
+		local overlap = OverlapParams.new()
+		overlap.FilterType = Enum.RaycastFilterType.Exclude
+		overlap.FilterDescendantsInstances = { character }
+		local parts = Workspace:GetPartBoundsInRadius(sample, CONFIG.SPELL_HIT_RADIUS, overlap)
+		for _, part in ipairs(parts) do
+			local mote = findMoteFromPart(part)
+			if mote then
+				hitMote = mote
+				hitPos = mote.Position
+				break
+			end
+		end
+		if hitMote then
+			break
+		end
+	end
+
+	spawnCastVisual(origin, hitPos)
+
+	if hitMote then
+		return applyWeaknessToMote(hitMote, player, CONFIG.SPELL_WEAKNESS)
+	end
+
+	return false
+end
+
+local function bindSpellTool(tool, player)
+	tool.Activated:Connect(function()
+		castTowardLook(player)
+	end)
+end
+
+local function playerHasSpellTool(player)
+	local backpack = player:FindFirstChild("Backpack")
+	if backpack and backpack:FindFirstChild(CONFIG.TOOL_NAME) then
+		return true
+	end
+	local character = player.Character
+	if character and character:FindFirstChild(CONFIG.TOOL_NAME) then
+		return true
+	end
+	return false
+end
+
+local function ensureSpellTool(player)
+	if not player then
+		return nil
+	end
+	player:SetAttribute(CONFIG.ATTR_HAS_SPELL, true)
+
+	if playerHasSpellTool(player) then
+		return nil
+	end
+
+	local tool = Instance.new("Tool")
+	tool.Name = CONFIG.TOOL_NAME
+	tool.RequiresHandle = true
+	tool.CanBeDropped = false
+	tool.ToolTip = "Arcane Focus — weaken Room C motes"
+
+	local handle = Instance.new("Part")
+	handle.Name = "Handle"
+	handle.Size = Vector3.new(0.4, 0.4, 1.2)
+	handle.Material = Enum.Material.Neon
+	handle.Color = CONFIG.VISUAL_COLOR
+	handle.CanCollide = false
+	handle.Massless = true
+	handle.Parent = tool
+
+	local tip = Instance.new("Part")
+	tip.Name = "FocusCrystal"
+	tip.Shape = Enum.PartType.Ball
+	tip.Size = Vector3.new(0.7, 0.7, 0.7)
+	tip.Material = Enum.Material.Neon
+	tip.Color = Color3.fromRGB(120, 210, 255)
+	tip.CanCollide = false
+	tip.Massless = true
+	tip.Parent = tool
+
+	local weld = Instance.new("Weld")
+	weld.Part0 = handle
+	weld.Part1 = tip
+	weld.C0 = CFrame.new(0, 0, -0.85)
+	weld.Parent = handle
+
+	local light = Instance.new("PointLight")
+	light.Color = CONFIG.VISUAL_COLOR
+	light.Brightness = 1.5
+	light.Range = 10
+	light.Parent = tip
+
+	bindSpellTool(tool, player)
+
+	local backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 5)
+	if not backpack then
+		tool:Destroy()
+		return nil
+	end
+
+	tool.Parent = backpack
+	print("[ROOM C] TrialArcaneFocus granted to " .. player.Name)
+	return tool
+end
+
+local function restoreSpellAfterRespawn(player)
+	if player:GetAttribute(CONFIG.ATTR_HAS_SPELL) ~= true then
+		return
+	end
+	ensureSpellTool(player)
+end
+
+local API = {
+	CONFIG = CONFIG,
+	castTowardLook = castTowardLook,
+	ensureSpellTool = ensureSpellTool,
+	restoreSpellAfterRespawn = restoreSpellAfterRespawn,
+	applyWeaknessToMote = applyWeaknessToMote,
+	onSpellHitMote = applyWeaknessToMote, -- alias for future real spell system
+}
+
+_G.TrialSpell = API
+
+Players.PlayerRemoving:Connect(function(player)
+	castCooldown[player.UserId] = nil
+end)
+
+print("[TRIAL SPELL] TrialChamberSpellBridge ready")
+
+return API
