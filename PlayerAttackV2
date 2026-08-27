@@ -1,0 +1,336 @@
+-- Progression_TrialChamber.lua
+-- Room B player progression + GolemBaneSword combat (server-authoritative).
+-- Responsibilities: sword creation, grant, swing, hit detection, damage.
+-- Golem AI/health bars/activation remain in TrialChamberGolemController.
+
+local CollectionService = game:GetService("CollectionService")
+local Workspace = game:GetService("Workspace")
+
+local SWING_COOLDOWN = 0.5
+local SWING_WINDOW = 0.25
+local DAMAGE_FRACTION = 0.15 -- 15% of target MaxHealth per valid hit
+
+------------------------------------------------------------------------
+-- Sword construction
+-- Geometry is built along Tool local -Z (default Tool forward) so the
+-- default hand grip holds the handle and the blade extends forward.
+------------------------------------------------------------------------
+
+local function weldOffset(handle, part, relativeCFrame)
+	local weld = Instance.new("Weld")
+	weld.Name = part.Name .. "Weld"
+	weld.Part0 = handle
+	weld.Part1 = part
+	weld.C0 = relativeCFrame
+	weld.C1 = CFrame.new()
+	weld.Parent = handle
+end
+
+local function makePart(props)
+	local part = Instance.new(props.ClassName or "Part")
+	part.Name = props.Name
+	part.Material = props.Material or Enum.Material.Metal
+	part.Color = props.Color or Color3.fromRGB(200, 200, 200)
+	part.Size = props.Size
+	if props.Shape then
+		part.Shape = props.Shape
+	end
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.Massless = true
+	part.CastShadow = true
+	part.Parent = props.Parent
+	return part
+end
+
+local function buildSwordTool()
+	local tool = Instance.new("Tool")
+	tool.Name = "GolemBaneSword"
+	tool.RequiresHandle = true
+	tool.CanBeDropped = false
+	tool.ToolTip = "GolemBane Sword"
+
+	-- Default Tool grip: hand holds Handle; Handle -Z faces forward along the arm.
+	-- Slight offset so the palm sits on the grip, not the guard.
+	tool.Grip = CFrame.new(0, 0, 0.05)
+
+	-- Handle / grip (length along Z, matches Tool forward axis)
+	local handle = makePart({
+		Name = "Handle",
+		Parent = tool,
+		Material = Enum.Material.Wood,
+		Color = Color3.fromRGB(78, 52, 30),
+		Size = Vector3.new(0.22, 0.22, 0.95),
+	})
+
+	-- Leather wrap mid-grip (visual only)
+	local wrap = makePart({
+		Name = "GripWrap",
+		Parent = tool,
+		Material = Enum.Material.Fabric,
+		Color = Color3.fromRGB(55, 40, 28),
+		Size = Vector3.new(0.26, 0.26, 0.55),
+	})
+	weldOffset(handle, wrap, CFrame.new(0, 0, 0.05))
+
+	-- Crossguard (across X)
+	local guard = makePart({
+		Name = "Guard",
+		Parent = tool,
+		Material = Enum.Material.Metal,
+		Color = Color3.fromRGB(170, 145, 70),
+		Size = Vector3.new(0.95, 0.16, 0.18),
+	})
+	weldOffset(handle, guard, CFrame.new(0, 0, -0.52))
+
+	-- Guard caps
+	local guardL = makePart({
+		Name = "GuardCapL",
+		Parent = tool,
+		Material = Enum.Material.Metal,
+		Color = Color3.fromRGB(150, 125, 55),
+		Size = Vector3.new(0.18, 0.18, 0.18),
+		Shape = Enum.PartType.Ball,
+	})
+	weldOffset(handle, guardL, CFrame.new(-0.48, 0, -0.52))
+
+	local guardR = makePart({
+		Name = "GuardCapR",
+		Parent = tool,
+		Material = Enum.Material.Metal,
+		Color = Color3.fromRGB(150, 125, 55),
+		Size = Vector3.new(0.18, 0.18, 0.18),
+		Shape = Enum.PartType.Ball,
+	})
+	weldOffset(handle, guardR, CFrame.new(0.48, 0, -0.52))
+
+	-- Thin blade extending forward (-Z)
+	local blade = makePart({
+		Name = "Blade",
+		Parent = tool,
+		Material = Enum.Material.Metal,
+		Color = Color3.fromRGB(205, 210, 220),
+		Size = Vector3.new(0.14, 0.38, 2.35),
+	})
+	weldOffset(handle, blade, CFrame.new(0, 0, -1.72))
+
+	-- Center ridge
+	local fuller = makePart({
+		Name = "Fuller",
+		Parent = tool,
+		Material = Enum.Material.Metal,
+		Color = Color3.fromRGB(175, 180, 190),
+		Size = Vector3.new(0.04, 0.16, 2.0),
+	})
+	weldOffset(handle, fuller, CFrame.new(0, 0, -1.65))
+
+	-- Pointed tip (wedge): rotate so the point faces forward (-Z)
+	local tip = makePart({
+		ClassName = "WedgePart",
+		Name = "Tip",
+		Parent = tool,
+		Material = Enum.Material.Metal,
+		Color = Color3.fromRGB(205, 210, 220),
+		Size = Vector3.new(0.14, 0.45, 0.38),
+	})
+	-- Wedge local: thick at -Z tip of blade; point along blade forward
+	weldOffset(handle, tip, CFrame.new(0, 0, -3.12) * CFrame.Angles(math.rad(-90), 0, 0))
+
+	-- Pommel at rear of handle (+Z)
+	local pommel = makePart({
+		Name = "Pommel",
+		Parent = tool,
+		Material = Enum.Material.Metal,
+		Color = Color3.fromRGB(170, 145, 70),
+		Size = Vector3.new(0.28, 0.28, 0.28),
+		Shape = Enum.PartType.Ball,
+	})
+	weldOffset(handle, pommel, CFrame.new(0, 0, 0.58))
+
+	return tool, blade
+end
+
+local function findGolemModelFromPart(part)
+	local current = part
+	while current and current ~= Workspace do
+		if current:IsA("Model") and CollectionService:HasTag(current, "Golem") then
+			return current
+		end
+		current = current.Parent
+	end
+	return nil
+end
+
+local function bindSwordCombat(tool, blade, player)
+	local canSwing = true
+	local swingDamagedGolems = {}
+
+	tool.Activated:Connect(function()
+		if not canSwing then
+			return
+		end
+		if not player.Character then
+			return
+		end
+
+		canSwing = false
+		table.clear(swingDamagedGolems)
+		print("[ROOM B COMBAT] Sword swing started")
+
+		local originalGrip = tool.Grip
+		-- Mild swing tilt; keep blade roughly forward
+		tool.Grip = originalGrip * CFrame.Angles(math.rad(-25), 0, math.rad(15))
+
+		task.spawn(function()
+			local swingEnd = os.clock() + SWING_WINDOW
+			while os.clock() < swingEnd do
+				local character = player.Character
+				if not character or not tool:IsDescendantOf(character) then
+					break
+				end
+
+				local playerRoot = character:FindFirstChild("HumanoidRootPart")
+				if playerRoot then
+					local hitboxCFrame = playerRoot.CFrame * CFrame.new(0, 0.5, -3.5)
+					local hitboxSize = Vector3.new(5, 5, 6)
+
+					local overlapParams = OverlapParams.new()
+					overlapParams.FilterDescendantsInstances = { player.Character, tool }
+					overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+
+					local parts = Workspace:GetPartBoundsInBox(hitboxCFrame, hitboxSize, overlapParams)
+					for _, part in ipairs(parts) do
+						local model = findGolemModelFromPart(part)
+						if model and not swingDamagedGolems[model] then
+							local currentHealth = model:GetAttribute("Health")
+							local isActive = model:GetAttribute("IsActive") == true
+							if currentHealth and currentHealth > 0 and isActive then
+								swingDamagedGolems[model] = true
+
+								local maxHealth = model:GetAttribute("MaxHealth") or 200
+								local damage = maxHealth * DAMAGE_FRACTION
+								local newHealth = math.max(0, currentHealth - damage)
+								model:SetAttribute("Health", newHealth)
+
+								print("[ROOM B COMBAT] Sword hit " .. model.Name .. " for " .. tostring(damage))
+								print("[ROOM B COMBAT] " .. model.Name .. " HP: " .. tostring(newHealth) .. "/" .. tostring(maxHealth))
+							end
+						end
+					end
+				end
+
+				task.wait()
+			end
+
+			tool.Grip = originalGrip
+			task.wait(math.max(0, SWING_COOLDOWN - SWING_WINDOW))
+			canSwing = true
+		end)
+	end)
+end
+
+------------------------------------------------------------------------
+-- Public API — GolemBaneSword grant / restore (idempotent)
+------------------------------------------------------------------------
+
+local ATTR_HAS_SWORD = "ReceivedRoomBSword" -- kept for compatibility; means "owns trial sword"
+
+local function playerHasSwordInstance(player)
+	local backpack = player:FindFirstChild("Backpack")
+	if backpack and backpack:FindFirstChild("GolemBaneSword") then
+		return true
+	end
+	local character = player.Character
+	if character and character:FindFirstChild("GolemBaneSword") then
+		return true
+	end
+	-- StarterGear copies can also appear briefly
+	local starter = player:FindFirstChild("StarterGear")
+	if starter and starter:FindFirstChild("GolemBaneSword") then
+		return true
+	end
+	return false
+end
+
+local function grantSwordInstance(player)
+	local tool, blade = buildSwordTool()
+	bindSwordCombat(tool, blade, player)
+
+	local backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 5)
+	if not backpack then
+		warn("[TRIAL SWORD] Could not find Backpack for " .. player.Name)
+		tool:Destroy()
+		return false
+	end
+
+	tool.Parent = backpack
+	return true
+end
+
+local function rewardSword(player)
+	if not player then
+		return
+	end
+
+	-- Idempotent: already holding a sword → mark owned, do nothing else
+	if playerHasSwordInstance(player) then
+		player:SetAttribute(ATTR_HAS_SWORD, true)
+		print("[TRIAL SWORD] GolemBaneSword already present — skip duplicate")
+		return
+	end
+
+	-- First grant or restore after death
+	local restoring = player:GetAttribute(ATTR_HAS_SWORD) == true
+	player:SetAttribute(ATTR_HAS_SWORD, true)
+
+	if not grantSwordInstance(player) then
+		-- Only clear ownership if this was a brand-new grant that failed
+		if not restoring then
+			player:SetAttribute(ATTR_HAS_SWORD, false)
+		end
+		return
+	end
+
+	if restoring then
+		print("[TRIAL SWORD] GolemBaneSword restored after respawn")
+	else
+		print("[TRIAL SWORD] GolemBaneSword granted")
+		print("[ROOM B COMBAT] GolemBaneSword placed in Backpack")
+		print("[ROOM B COMBAT] GolemBaneSword granted to " .. player.Name)
+	end
+end
+
+local function ensureSwordAfterRespawn(player)
+	if not player then
+		return
+	end
+	if player:GetAttribute(ATTR_HAS_SWORD) ~= true then
+		return
+	end
+	print("[TRIAL SWORD] Respawn detected - verifying sword")
+	rewardSword(player)
+end
+
+local function hookPlayerSwordPersistence(player)
+	player.CharacterAdded:Connect(function()
+		task.defer(function()
+			-- Wait for Backpack / default tools to settle
+			task.wait(0.15)
+			ensureSwordAfterRespawn(player)
+		end)
+	end)
+end
+
+local Players = game:GetService("Players")
+Players.PlayerAdded:Connect(hookPlayerSwordPersistence)
+for _, player in ipairs(Players:GetPlayers()) do
+	hookPlayerSwordPersistence(player)
+end
+
+_G.Progression = {
+	rewardSword = rewardSword,
+	ensureSwordAfterRespawn = ensureSwordAfterRespawn,
+}
+
+return _G.Progression
