@@ -11,6 +11,7 @@ local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local Workspace = game:GetService("Workspace")
 local Debris = game:GetService("Debris")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 ------------------------------------------------------------------------
 -- Configurable balance (Room C ~1 minute encounter)
@@ -20,12 +21,26 @@ local CONFIG = {
 	SPELL_COOLDOWN = 0.55,
 	SPELL_RANGE = 70,
 	SPELL_HIT_RADIUS = 5.5,
-	SPELL_WEAKNESS = 10, -- per successful mote hit; 6 motes * 100 / 10 ~= 60 casts
+	SPELL_WEAKNESS = 20, -- spell → mote only; 5 hits to dissolve at 100 max
 	VISUAL_COLOR = Color3.fromRGB(180, 230, 255),
 	ATTR_HAS_SPELL = "HasTrialArcaneSpell",
 }
 
 local castCooldown = {} -- [userId] = os.clock()
+
+local function getEncounter()
+	if typeof(_G.RoomCMoteEncounter) == "table" then
+		return _G.RoomCMoteEncounter
+	end
+	local mod = ServerScriptService:FindFirstChild("RoomCMoteEncounter")
+	if mod and mod:IsA("ModuleScript") then
+		local ok, result = pcall(require, mod)
+		if ok then
+			return result
+		end
+	end
+	return nil
+end
 
 local function findMoteFromPart(part)
 	local current = part
@@ -48,26 +63,17 @@ local function applyWeaknessToMote(mote, player, amount)
 		return false
 	end
 
+	local encounter = getEncounter()
+	if encounter and type(encounter.applyMoteSpellHit) == "function" then
+		return encounter.applyMoteSpellHit(mote, player, amount)
+	end
+
+	-- Fallback if encounter module is unavailable (should not happen in production).
 	local maxW = mote:GetAttribute("MaxWeakness") or 100
 	local cur = mote:GetAttribute("Weakness") or 0
 	local nextW = math.min(maxW, cur + amount)
 	mote:SetAttribute("Weakness", nextW)
-
-	local pct = math.floor((nextW / maxW) * 100 + 0.5)
-	print("[ROOM C] Mote spell hit (" .. mote.Name .. ")")
-	-- Milestone logs only
-	if pct >= 35 and (cur / maxW) * 100 < 35 then
-		print("[ROOM C] Mote weakness: 35% (" .. mote.Name .. ")")
-	elseif pct >= 75 and (cur / maxW) * 100 < 75 then
-		print("[ROOM C] Mote weakness: 75% (" .. mote.Name .. ")")
-	elseif nextW >= maxW then
-		print("[ROOM C] Mote weakness: 100% (" .. mote.Name .. ")")
-	end
-
-	if typeof(_G.RoomCMoteEncounter) == "table" and type(_G.RoomCMoteEncounter.onWeaknessChanged) == "function" then
-		_G.RoomCMoteEncounter.onWeaknessChanged(mote, nextW, maxW, player)
-	end
-
+	warn("[ROOM A MOTES] RoomCMoteEncounter missing — mote hit applied without visuals/UI")
 	return true
 end
 
@@ -100,6 +106,10 @@ end
 
 local function castTowardLook(player)
 	if not player then
+		return false
+	end
+
+	if player:GetAttribute(CONFIG.ATTR_HAS_SPELL) ~= true then
 		return false
 	end
 
@@ -177,7 +187,9 @@ local function ensureSpellTool(player)
 	if not player then
 		return nil
 	end
-	player:SetAttribute(CONFIG.ATTR_HAS_SPELL, true)
+	if player:GetAttribute(CONFIG.ATTR_HAS_SPELL) ~= true then
+		return nil
+	end
 
 	if playerHasSpellTool(player) then
 		return nil
@@ -233,16 +245,73 @@ local function ensureSpellTool(player)
 	return tool
 end
 
+local function unlockSpell(player)
+	if not player then
+		return nil
+	end
+	if player:GetAttribute(CONFIG.ATTR_HAS_SPELL) == true and playerHasSpellTool(player) then
+		return nil
+	end
+
+	player:SetAttribute(CONFIG.ATTR_HAS_SPELL, true)
+	print("[PROGRESSION] Spell unlocked for " .. player.Name)
+	print("[PROGRESSION] Spell persistence state = TRUE")
+	return ensureSpellTool(player)
+end
+
 local function restoreSpellAfterRespawn(player)
 	if player:GetAttribute(CONFIG.ATTR_HAS_SPELL) ~= true then
+		print("[PROGRESSION] Respawn restoration: Spell = FALSE")
 		return
 	end
+	print("[PROGRESSION] Respawn restoration: Spell = TRUE")
 	ensureSpellTool(player)
+end
+
+local hookedSpellPlayers = {}
+
+local function hookPlayerSpellPersistence(player)
+	if not player or hookedSpellPlayers[player] then
+		return
+	end
+	hookedSpellPlayers[player] = true
+
+	player.CharacterAdded:Connect(function(_character)
+		task.defer(function()
+			local backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 8)
+			if not backpack then
+				return
+			end
+			task.wait(0.2)
+			if player.Parent then
+				restoreSpellAfterRespawn(player)
+			end
+			task.wait(0.35)
+			if player.Parent
+				and player:GetAttribute(CONFIG.ATTR_HAS_SPELL) == true
+				and not playerHasSpellTool(player)
+			then
+				ensureSpellTool(player)
+			end
+		end)
+	end)
+end
+
+Players.PlayerAdded:Connect(function(player)
+	hookPlayerSpellPersistence(player)
+end)
+Players.PlayerRemoving:Connect(function(player)
+	castCooldown[player.UserId] = nil
+	hookedSpellPlayers[player] = nil
+end)
+for _, player in ipairs(Players:GetPlayers()) do
+	hookPlayerSpellPersistence(player)
 end
 
 local API = {
 	CONFIG = CONFIG,
 	castTowardLook = castTowardLook,
+	unlockSpell = unlockSpell,
 	ensureSpellTool = ensureSpellTool,
 	restoreSpellAfterRespawn = restoreSpellAfterRespawn,
 	applyWeaknessToMote = applyWeaknessToMote,
@@ -250,10 +319,6 @@ local API = {
 }
 
 _G.TrialSpell = API
-
-Players.PlayerRemoving:Connect(function(player)
-	castCooldown[player.UserId] = nil
-end)
 
 print("[TRIAL SPELL] TrialChamberSpellBridge ready")
 
