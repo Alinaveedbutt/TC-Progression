@@ -11,6 +11,7 @@ local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local Workspace = game:GetService("Workspace")
 local Debris = game:GetService("Debris")
+local TweenService = game:GetService("TweenService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 ------------------------------------------------------------------------
@@ -68,12 +69,23 @@ local function applyWeaknessToMote(mote, player, amount)
 		return encounter.applyMoteSpellHit(mote, player, amount)
 	end
 
-	-- Fallback if encounter module is unavailable (should not happen in production).
+	-- Fallback if encounter module is unavailable: still kill at 0 HP (no stuck black orbs).
 	local maxW = mote:GetAttribute("MaxWeakness") or 100
 	local cur = mote:GetAttribute("Weakness") or 0
 	local nextW = math.min(maxW, cur + amount)
 	mote:SetAttribute("Weakness", nextW)
-	warn("[ROOM A MOTES] RoomCMoteEncounter missing — mote hit applied without visuals/UI")
+	local remaining = math.max(0, maxW - nextW)
+	if remaining <= 0 then
+		mote:SetAttribute("Dissolved", true)
+		mote.Transparency = 1
+		mote:Destroy()
+		print("[ROOM C MOTES] Fallback dissolve (encounter module missing)")
+	else
+		-- Darken toward black so the player still sees hit feedback
+		local ratio = remaining / maxW
+		mote.Color = Color3.fromRGB(60, 180, 255):Lerp(Color3.new(0, 0, 0), 1 - ratio)
+	end
+	warn("[ROOM C MOTES] RoomCMoteEncounter missing — used fallback hit path")
 	return true
 end
 
@@ -83,25 +95,63 @@ local function spawnCastVisual(origin, targetPos)
 		return
 	end
 
-	local beamPart = Instance.new("Part")
-	beamPart.Name = "TrialSpellBolt"
-	beamPart.Anchored = true
-	beamPart.CanCollide = false
-	beamPart.CanTouch = false
-	beamPart.CanQuery = false
-	beamPart.Material = Enum.Material.Neon
-	beamPart.Color = CONFIG.VISUAL_COLOR
-	beamPart.Size = Vector3.new(0.35, 0.35, dist)
-	beamPart.CFrame = CFrame.lookAt(origin, targetPos) * CFrame.new(0, 0, -dist / 2)
-	beamPart.Transparency = 0.15
-	beamPart.Parent = Workspace
-	Debris:AddItem(beamPart, 0.18)
+	-- Soft arcane bolt trail (not a solid neon laser rod)
+	local att0 = Instance.new("Attachment")
+	att0.WorldPosition = origin
+	att0.Parent = workspace.Terrain
+
+	local att1 = Instance.new("Attachment")
+	att1.WorldPosition = targetPos
+	att1.Parent = workspace.Terrain
+
+	local beam = Instance.new("Beam")
+	beam.Name = "TrialSpellBolt"
+	beam.Attachment0 = att0
+	beam.Attachment1 = att1
+	beam.FaceCamera = true
+	beam.Width0 = 0.45
+	beam.Width1 = 0.12
+	beam.LightEmission = 1
+	beam.LightInfluence = 0
+	beam.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.15),
+		NumberSequenceKeypoint.new(0.7, 0.35),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	beam.Color = ColorSequence.new(CONFIG.VISUAL_COLOR, Color3.fromRGB(255, 255, 255))
+	beam.Segments = 10
+	beam.Parent = att0
+
+	local flash = Instance.new("Part")
+	flash.Name = "TrialSpellFlash"
+	flash.Shape = Enum.PartType.Ball
+	flash.Size = Vector3.new(0.6, 0.6, 0.6)
+	flash.Material = Enum.Material.Neon
+	flash.Color = CONFIG.VISUAL_COLOR
+	flash.Anchored = true
+	flash.CanCollide = false
+	flash.CanQuery = false
+	flash.Transparency = 0.2
+	flash.CFrame = CFrame.new(targetPos)
+	flash.Parent = Workspace
 
 	local light = Instance.new("PointLight")
 	light.Color = CONFIG.VISUAL_COLOR
 	light.Brightness = 2
-	light.Range = 12
-	light.Parent = beamPart
+	light.Range = 10
+	light.Parent = flash
+
+	Debris:AddItem(att0, 0.2)
+	Debris:AddItem(att1, 0.2)
+	Debris:AddItem(flash, 0.22)
+	task.delay(0.05, function()
+		if flash.Parent then
+			TweenService:Create(flash, TweenInfo.new(0.15), {
+				Size = Vector3.new(1.6, 1.6, 1.6),
+				Transparency = 1,
+			}):Play()
+		end
+	end)
 end
 
 local function castTowardLook(player)
