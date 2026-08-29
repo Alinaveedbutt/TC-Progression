@@ -894,6 +894,12 @@ local function openGateBC()
 		return
 	end
 
+	-- Remember sealed pose for Revamp's close-on-Room-C-entry (if not already stored).
+	if not _G.GateBCClosedCFrameL then
+		_G.GateBCClosedCFrameL = leafL:GetPivot()
+		_G.GateBCClosedCFrameR = leafR:GetPivot()
+	end
+
 	print("[ROOM B] Gate BC opened successfully")
 	print("[RoomB] ALL GOLEMS DEFEATED. OPENING GATE BC.")
 
@@ -1182,11 +1188,7 @@ local function spawnController(golem, golemType, animCache)
 				_G.StoneDefeated = true
 				print("[PROGRESSION] StoneGolem defeated")
 				print("[ROOM B GOLEMS] StoneGolem defeated")
-				for _, plr in ipairs(Players:GetPlayers()) do
-					if _G.TrialSpell and type(_G.TrialSpell.unlockSpell) == "function" then
-						_G.TrialSpell.unlockSpell(plr)
-					end
-				end
+				-- Spell unlocks on Room C entry (Gate_BC close), not here in Room B.
 				checkRoomBCompletion()
 			end
 
