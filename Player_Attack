@@ -12,8 +12,8 @@ local DAMAGE_FRACTION = 0.15 -- 15% of target MaxHealth per valid hit
 
 ------------------------------------------------------------------------
 -- Sword construction
--- Geometry is built along Tool local -Z (default Tool forward) so the
--- default hand grip holds the handle and the blade extends forward.
+-- Blade built along Handle -Z (Tool forward). Grip rotates it into a
+-- natural R15 hold: pommel in palm, blade extending forward from the hand.
 ------------------------------------------------------------------------
 
 local function weldOffset(handle, part, relativeCFrame)
@@ -51,102 +51,95 @@ local function buildSwordTool()
 	tool.CanBeDropped = false
 	tool.ToolTip = "GolemBane Sword"
 
-	-- Default Tool grip: hand holds Handle; Handle -Z faces forward along the arm.
-	-- Slight offset so the palm sits on the grip, not the guard.
-	tool.Grip = CFrame.new(0, 0, 0.05)
+	-- R15 RightGrip: rotate so Handle -Z (blade) aims forward along the arm,
+	-- not out to the side. Palm sits on the leather wrap.
+	tool.Grip = CFrame.new(0, -0.1, -0.35) * CFrame.Angles(math.rad(-90), math.rad(-90), 0)
 
-	-- Handle / grip (length along Z, matches Tool forward axis)
+	-- Handle length along Z (Tool forward axis)
 	local handle = makePart({
 		Name = "Handle",
 		Parent = tool,
 		Material = Enum.Material.Wood,
 		Color = Color3.fromRGB(78, 52, 30),
-		Size = Vector3.new(0.22, 0.22, 0.95),
+		Size = Vector3.new(0.28, 0.28, 1.05),
 	})
 
-	-- Leather wrap mid-grip (visual only)
 	local wrap = makePart({
 		Name = "GripWrap",
 		Parent = tool,
 		Material = Enum.Material.Fabric,
 		Color = Color3.fromRGB(55, 40, 28),
-		Size = Vector3.new(0.26, 0.26, 0.55),
+		Size = Vector3.new(0.32, 0.32, 0.55),
 	})
 	weldOffset(handle, wrap, CFrame.new(0, 0, 0.05))
 
-	-- Crossguard (across X)
 	local guard = makePart({
 		Name = "Guard",
 		Parent = tool,
 		Material = Enum.Material.Metal,
 		Color = Color3.fromRGB(170, 145, 70),
-		Size = Vector3.new(0.95, 0.16, 0.18),
+		Size = Vector3.new(0.95, 0.18, 0.16),
 	})
-	weldOffset(handle, guard, CFrame.new(0, 0, -0.52))
+	weldOffset(handle, guard, CFrame.new(0, 0, -0.55))
 
-	-- Guard caps
 	local guardL = makePart({
 		Name = "GuardCapL",
 		Parent = tool,
 		Material = Enum.Material.Metal,
 		Color = Color3.fromRGB(150, 125, 55),
-		Size = Vector3.new(0.18, 0.18, 0.18),
+		Size = Vector3.new(0.2, 0.2, 0.2),
 		Shape = Enum.PartType.Ball,
 	})
-	weldOffset(handle, guardL, CFrame.new(-0.48, 0, -0.52))
+	weldOffset(handle, guardL, CFrame.new(-0.48, 0, -0.55))
 
 	local guardR = makePart({
 		Name = "GuardCapR",
 		Parent = tool,
 		Material = Enum.Material.Metal,
 		Color = Color3.fromRGB(150, 125, 55),
-		Size = Vector3.new(0.18, 0.18, 0.18),
+		Size = Vector3.new(0.2, 0.2, 0.2),
 		Shape = Enum.PartType.Ball,
 	})
-	weldOffset(handle, guardR, CFrame.new(0.48, 0, -0.52))
+	weldOffset(handle, guardR, CFrame.new(0.48, 0, -0.55))
 
-	-- Thin blade extending forward (-Z)
+	-- Blade extends forward (-Z)
 	local blade = makePart({
 		Name = "Blade",
 		Parent = tool,
 		Material = Enum.Material.Metal,
 		Color = Color3.fromRGB(205, 210, 220),
-		Size = Vector3.new(0.14, 0.38, 2.35),
+		Size = Vector3.new(0.12, 0.42, 2.4),
 	})
-	weldOffset(handle, blade, CFrame.new(0, 0, -1.72))
+	weldOffset(handle, blade, CFrame.new(0, 0, -1.85))
 
-	-- Center ridge
 	local fuller = makePart({
 		Name = "Fuller",
 		Parent = tool,
 		Material = Enum.Material.Metal,
 		Color = Color3.fromRGB(175, 180, 190),
-		Size = Vector3.new(0.04, 0.16, 2.0),
+		Size = Vector3.new(0.04, 0.18, 2.05),
 	})
-	weldOffset(handle, fuller, CFrame.new(0, 0, -1.65))
+	weldOffset(handle, fuller, CFrame.new(0, 0, -1.75))
 
-	-- Pointed tip (wedge): rotate so the point faces forward (-Z)
 	local tip = makePart({
 		ClassName = "WedgePart",
 		Name = "Tip",
 		Parent = tool,
 		Material = Enum.Material.Metal,
 		Color = Color3.fromRGB(205, 210, 220),
-		Size = Vector3.new(0.14, 0.45, 0.38),
+		Size = Vector3.new(0.12, 0.42, 0.4),
 	})
-	-- Wedge local: thick at -Z tip of blade; point along blade forward
-	weldOffset(handle, tip, CFrame.new(0, 0, -3.12) * CFrame.Angles(math.rad(-90), 0, 0))
+	weldOffset(handle, tip, CFrame.new(0, 0, -3.25) * CFrame.Angles(math.rad(-90), 0, 0))
 
-	-- Pommel at rear of handle (+Z)
 	local pommel = makePart({
 		Name = "Pommel",
 		Parent = tool,
 		Material = Enum.Material.Metal,
 		Color = Color3.fromRGB(170, 145, 70),
-		Size = Vector3.new(0.28, 0.28, 0.28),
+		Size = Vector3.new(0.32, 0.32, 0.32),
 		Shape = Enum.PartType.Ball,
 	})
-	weldOffset(handle, pommel, CFrame.new(0, 0, 0.58))
+	weldOffset(handle, pommel, CFrame.new(0, 0, 0.62))
 
 	return tool, blade
 end
@@ -179,8 +172,8 @@ local function bindSwordCombat(tool, blade, player)
 		print("[ROOM B COMBAT] Sword swing started")
 
 		local originalGrip = tool.Grip
-		-- Mild swing tilt; keep blade roughly forward
-		tool.Grip = originalGrip * CFrame.Angles(math.rad(-25), 0, math.rad(15))
+		-- Mild swing arc
+		tool.Grip = originalGrip * CFrame.Angles(math.rad(-40), math.rad(15), math.rad(25))
 
 		task.spawn(function()
 			local swingEnd = os.clock() + SWING_WINDOW
