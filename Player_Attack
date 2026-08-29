@@ -234,22 +234,58 @@ end
 -- Public API — GolemBaneSword grant / restore (idempotent)
 ------------------------------------------------------------------------
 
-local ATTR_HAS_SWORD = "ReceivedRoomBSword" -- kept for compatibility; means "owns trial sword"
+local ATTR_HAS_SWORD = "ReceivedRoomBSword" -- entitlement: earned Room B sword
+local SWORD_NAME = "GolemBaneSword"
+
+local Players = game:GetService("Players")
+local hookedPlayers = {} -- [Player] = true — one CharacterAdded hook per player
+
+local hookPlayerSwordPersistence -- forward declaration
 
 local function playerHasSwordInstance(player)
 	local backpack = player:FindFirstChild("Backpack")
-	if backpack and backpack:FindFirstChild("GolemBaneSword") then
+	if backpack and backpack:FindFirstChild(SWORD_NAME) then
 		return true
 	end
 	local character = player.Character
-	if character and character:FindFirstChild("GolemBaneSword") then
+	if character and character:FindFirstChild(SWORD_NAME) then
 		return true
 	end
-	-- StarterGear copies can also appear briefly
-	local starter = player:FindFirstChild("StarterGear")
-	if starter and starter:FindFirstChild("GolemBaneSword") then
+	return false
+end
+
+-- Room B sword is relevant while the player still needs it for the trial encounter.
+local function isRoomBSwordRelevant(player)
+	if not player then
+		return false
+	end
+	if player:GetAttribute(ATTR_HAS_SWORD) ~= true then
+		return false
+	end
+
+	local room = player:GetAttribute("CurrentTrialRoom")
+	-- Active Room B fight — always restore.
+	if room == "B" then
 		return true
 	end
+	-- Later chambers: keep sword for the remainder of the Trial.
+	if room == "C" or room == "D" then
+		return true
+	end
+
+	-- Entitlement set but checkpoint race: golems still present in world.
+	local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+	if container then
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Model") and CollectionService:HasTag(child, "Golem") then
+				local hp = child:GetAttribute("Health")
+				if hp == nil or hp > 0 then
+					return true
+				end
+			end
+		end
+	end
+
 	return false
 end
 
@@ -257,11 +293,25 @@ local function grantSwordInstance(player)
 	local tool, blade = buildSwordTool()
 	bindSwordCombat(tool, blade, player)
 
-	local backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 5)
+	local backpack = player:FindFirstChild("Backpack")
 	if not backpack then
-		warn("[TRIAL SWORD] Could not find Backpack for " .. player.Name)
+		backpack = player:WaitForChild("Backpack", 8)
+	end
+	if not backpack then
+		warn("[ROOM B COMBAT] Could not find Backpack for " .. player.Name)
 		tool:Destroy()
 		return false
+	end
+
+	-- Final duplicate check after waiting (another restore may have won the race).
+	if backpack:FindFirstChild(SWORD_NAME) then
+		tool:Destroy()
+		return true
+	end
+	local character = player.Character
+	if character and character:FindFirstChild(SWORD_NAME) then
+		tool:Destroy()
+		return true
 	end
 
 	tool.Parent = backpack
@@ -273,19 +323,26 @@ local function rewardSword(player)
 		return
 	end
 
-	-- Idempotent: already holding a sword → mark owned, do nothing else
-	if playerHasSwordInstance(player) then
-		player:SetAttribute(ATTR_HAS_SWORD, true)
-		print("[TRIAL SWORD] GolemBaneSword already present — skip duplicate")
+	local room = player:GetAttribute("CurrentTrialRoom")
+	if room == "A" and player:GetAttribute(ATTR_HAS_SWORD) ~= true then
+		print("[PROGRESSION] GolemBaneSword locked - player is in Room A")
 		return
 	end
 
-	-- First grant or restore after death
+	-- Ensure this player has a one-time CharacterAdded restore hook.
+	hookPlayerSwordPersistence(player)
+
+	-- Idempotent: already holding a sword → mark owned, do nothing else
+	if playerHasSwordInstance(player) then
+		player:SetAttribute(ATTR_HAS_SWORD, true)
+		print("[ROOM B COMBAT] GolemBaneSword already present — skip duplicate")
+		return
+	end
+
 	local restoring = player:GetAttribute(ATTR_HAS_SWORD) == true
 	player:SetAttribute(ATTR_HAS_SWORD, true)
 
 	if not grantSwordInstance(player) then
-		-- Only clear ownership if this was a brand-new grant that failed
 		if not restoring then
 			player:SetAttribute(ATTR_HAS_SWORD, false)
 		end
@@ -293,9 +350,12 @@ local function rewardSword(player)
 	end
 
 	if restoring then
-		print("[TRIAL SWORD] GolemBaneSword restored after respawn")
+		print("[ROOM B COMBAT] GolemBaneSword restored successfully")
+		print("[PROGRESSION] Respawn restoration: GolemBaneSword = TRUE")
 	else
-		print("[TRIAL SWORD] GolemBaneSword granted")
+		print("[PROGRESSION] Room B unlocked GolemBaneSword for " .. player.Name)
+		print("[PROGRESSION] GolemBaneSword persistence state = TRUE")
+		print("[ROOM B COMBAT] GolemBaneSword granted")
 		print("[ROOM B COMBAT] GolemBaneSword placed in Backpack")
 		print("[ROOM B COMBAT] GolemBaneSword granted to " .. player.Name)
 	end
@@ -305,25 +365,62 @@ local function ensureSwordAfterRespawn(player)
 	if not player then
 		return
 	end
+
 	if player:GetAttribute(ATTR_HAS_SWORD) ~= true then
+		print("[PROGRESSION] Respawn restoration: GolemBaneSword = FALSE")
 		return
 	end
-	print("[TRIAL SWORD] Respawn detected - verifying sword")
+
+	print("[PROGRESSION] Respawn restoration: GolemBaneSword = TRUE")
+
+	if playerHasSwordInstance(player) then
+		print("[ROOM B COMBAT] GolemBaneSword already present — skip duplicate")
+		return
+	end
+
+	print("[ROOM B COMBAT] Restoring GolemBaneSword to respawned player")
 	rewardSword(player)
 end
 
-local function hookPlayerSwordPersistence(player)
-	player.CharacterAdded:Connect(function()
+hookPlayerSwordPersistence = function(player)
+	if not player or hookedPlayers[player] then
+		return
+	end
+	hookedPlayers[player] = true
+
+	player.CharacterAdded:Connect(function(_character)
 		task.defer(function()
-			-- Wait for Backpack / default tools to settle
-			task.wait(0.15)
+			-- Backpack lives on the Player and can lag slightly after respawn.
+			local backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 8)
+			if not backpack then
+				warn("[ROOM B COMBAT] Backpack missing after respawn for " .. player.Name)
+				return
+			end
+			task.wait(0.2)
+			if not player.Parent then
+				return
+			end
 			ensureSwordAfterRespawn(player)
+
+			-- One retry for ordering races (Character/Backpack/tools settling).
+			task.wait(0.35)
+			if player.Parent
+				and player:GetAttribute(ATTR_HAS_SWORD) == true
+				and not playerHasSwordInstance(player)
+			then
+				print("[ROOM B COMBAT] Restoring GolemBaneSword to respawned player (retry)")
+				rewardSword(player)
+			end
 		end)
 	end)
 end
 
-local Players = game:GetService("Players")
-Players.PlayerAdded:Connect(hookPlayerSwordPersistence)
+Players.PlayerAdded:Connect(function(player)
+	hookPlayerSwordPersistence(player)
+end)
+Players.PlayerRemoving:Connect(function(player)
+	hookedPlayers[player] = nil
+end)
 for _, player in ipairs(Players:GetPlayers()) do
 	hookPlayerSwordPersistence(player)
 end
@@ -331,6 +428,7 @@ end
 _G.Progression = {
 	rewardSword = rewardSword,
 	ensureSwordAfterRespawn = ensureSwordAfterRespawn,
+	isRoomBSwordRelevant = isRoomBSwordRelevant,
 }
 
 return _G.Progression
