@@ -11,12 +11,22 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Debris = game:GetService("Debris")
 local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterPlayer = game:GetService("StarterPlayer")
 local Workspace = game:GetService("Workspace")
+
+local moteHitRemote = ReplicatedStorage:FindFirstChild("TrialMoteDurabilityHit")
+if not moteHitRemote then
+	moteHitRemote = Instance.new("RemoteEvent")
+	moteHitRemote.Name = "TrialMoteDurabilityHit"
+	moteHitRemote.Parent = ReplicatedStorage
+end
 
 ------------------------------------------------------------------------
 -- Configurable encounter balance
 ------------------------------------------------------------------------
 local CONFIG = {
+	MOTE_COUNT = 7,
 	-- Spacing / orbit (studs). Larger = clearer separation between motes.
 	MOTE_BASE_RADIUS = 24,
 	MOTE_RADIUS_STEP = 1.6,
@@ -24,9 +34,15 @@ local CONFIG = {
 	MOTE_VERTICAL_AMP = 2.8,
 	MOTE_SECONDARY_AMP = 1.2,
 
-	-- Contact hazard (secondary to ranged rays)
-	CONTACT_DAMAGE = 10,
-	CONTACT_COOLDOWN = 0.75,
+	-- Mote orbit hazard (zone around the Heart, independent of visual motion)
+	HAZARD_DAMAGE = 1,
+	HAZARD_INTERVAL = 1,
+	HAZARD_RADIUS_PAD = 3,
+	HAZARD_HEIGHT_PAD = 6,
+
+	-- Legacy contact values kept only so older comments/callers still resolve
+	CONTACT_DAMAGE = 1,
+	CONTACT_COOLDOWN = 1,
 	CONTACT_RADIUS = 2.4,
 
 	-- Ranged magical ray attacks
@@ -39,8 +55,9 @@ local CONFIG = {
 	RAY_MAX_RANGE = 95,
 	RAY_STAGGER = 0.35, -- delay between mote loops starting
 
-	-- Weakening (~60s active spell combat at SPELL_WEAKNESS=10, 6 motes)
+	-- Weakening (5 spell hits × 20 damage = 100 at SPELL_WEAKNESS=20)
 	MAX_WEAKNESS = 100,
+	DISSOLVE_DURATION = 0.55,
 
 	-- Heart
 	ATTR_UNLOCKED = "HeartUnlocked",
@@ -49,6 +66,167 @@ local CONFIG = {
 }
 
 local activeEncounters = {} -- [dais] = state
+local moteRegistry = {} -- [orb] = state (authoritative hit lookup)
+
+local function ensureMoteDurabilityUISystem()
+	local uiSource = [=[
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local remote = ReplicatedStorage:WaitForChild("TrialMoteDurabilityHit", 30)
+if not remote then
+	warn("[ROOM A MOTES UI] TrialMoteDurabilityHit remote missing")
+	return
+end
+
+local DISPLAY_SECONDS = 3
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "TrialMoteDurabilityUI"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Name = "HitPanel"
+frame.AnchorPoint = Vector2.new(0.5, 0)
+frame.Position = UDim2.new(0.5, 0, 0.12, 0)
+frame.Size = UDim2.new(0, 240, 0, 72)
+frame.BackgroundColor3 = Color3.fromRGB(18, 24, 36)
+frame.BackgroundTransparency = 0.15
+frame.BorderSizePixel = 0
+frame.Visible = false
+frame.Parent = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent = frame
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(90, 170, 255)
+stroke.Thickness = 1.5
+stroke.Transparency = 0.2
+stroke.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Name = "Title"
+title.BackgroundTransparency = 1
+title.Size = UDim2.new(1, -16, 0, 24)
+title.Position = UDim2.new(0, 8, 0, 8)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.TextColor3 = Color3.fromRGB(170, 220, 255)
+title.Text = "MOTE HIT"
+title.Parent = frame
+
+local value = Instance.new("TextLabel")
+value.Name = "Value"
+value.BackgroundTransparency = 1
+value.Size = UDim2.new(1, -16, 0, 28)
+value.Position = UDim2.new(0, 8, 0, 34)
+value.Font = Enum.Font.GothamMedium
+value.TextSize = 20
+value.TextColor3 = Color3.fromRGB(240, 248, 255)
+value.Text = "Durability: 100/100"
+value.Parent = frame
+
+local hideToken = 0
+
+local function showDurability(remaining, maxDurability)
+	hideToken += 1
+	local token = hideToken
+
+	frame.Visible = true
+	frame.BackgroundTransparency = 0.15
+	title.TextTransparency = 0
+	value.TextTransparency = 0
+	stroke.Transparency = 0.2
+	value.Text = string.format("Durability: %d/%d", math.floor(remaining), math.floor(maxDurability))
+
+	task.delay(DISPLAY_SECONDS, function()
+		if token ~= hideToken then
+			return
+		end
+		local fade = TweenService:Create(frame, TweenInfo.new(0.25), { BackgroundTransparency = 1 })
+		local fadeTitle = TweenService:Create(title, TweenInfo.new(0.25), { TextTransparency = 1 })
+		local fadeValue = TweenService:Create(value, TweenInfo.new(0.25), { TextTransparency = 1 })
+		local fadeStroke = TweenService:Create(stroke, TweenInfo.new(0.25), { Transparency = 1 })
+		fade:Play()
+		fadeTitle:Play()
+		fadeValue:Play()
+		fadeStroke:Play()
+		fade.Completed:Wait()
+		if token == hideToken then
+			frame.Visible = false
+		end
+	end)
+end
+
+remote.OnClientEvent:Connect(function(remaining, maxDurability)
+	if typeof(remaining) ~= "number" or typeof(maxDurability) ~= "number" then
+		return
+	end
+	showDurability(remaining, maxDurability)
+end)
+
+print("[ROOM A MOTES UI] Mote durability indicator ready")
+]=]
+
+	local function install(container)
+		if not container then
+			return
+		end
+		local existing = container:FindFirstChild("TrialMoteDurabilityUI")
+		if existing then
+			existing:Destroy()
+		end
+		local ls = Instance.new("LocalScript")
+		ls.Name = "TrialMoteDurabilityUI"
+		local ok, err = pcall(function()
+			ls.Source = uiSource
+		end)
+		if not ok then
+			warn("[ROOM A MOTES UI] Could not install durability UI: " .. tostring(err))
+		end
+		ls.Parent = container
+	end
+
+	local starterPlayerScripts = StarterPlayer:FindFirstChild("StarterPlayerScripts")
+	if starterPlayerScripts then
+		install(starterPlayerScripts)
+	end
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local playerScripts = plr:FindFirstChild("PlayerScripts")
+		if playerScripts then
+			install(playerScripts)
+		end
+	end
+end
+
+local function resolveEncounterState(mote)
+	local state = moteRegistry[mote]
+	if state then
+		return state
+	end
+
+	local dais = mote:FindFirstAncestor("SacredDais")
+	state = dais and activeEncounters[dais]
+	if state then
+		return state
+	end
+
+	for _, encounterState in pairs(activeEncounters) do
+		if encounterState.orbFolder and mote:IsDescendantOf(encounterState.orbFolder) then
+			return encounterState
+		end
+	end
+
+	return nil
+end
 
 local function getHeartCenter(dais, crystal)
 	local tier = dais:FindFirstChild("DaisTier_3")
@@ -67,97 +245,262 @@ local function countAliveMotes(orbFolder)
 		return 0
 	end
 	for _, orb in ipairs(orbFolder:GetChildren()) do
-		if orb:IsA("BasePart") and orb:GetAttribute("Dissolved") ~= true then
+		if orb:IsA("BasePart") and CollectionService:HasTag(orb, "RoomCBlueMote") then
+			if orb:GetAttribute("Dissolved") ~= true then
+				n += 1
+			end
+		end
+	end
+	return n
+end
+
+local function countAliveMotesInState(state)
+	local n = 0
+	if not state or not state.motes then
+		return 0
+	end
+	for orb, moteState in pairs(state.motes) do
+		if moteState.alive and orb.Parent and orb:GetAttribute("Dissolved") ~= true then
 			n += 1
 		end
 	end
 	return n
 end
 
-local function applyMoteVisualWeakness(orb)
-	local maxW = orb:GetAttribute("MaxWeakness") or CONFIG.MAX_WEAKNESS
-	local w = orb:GetAttribute("Weakness") or 0
-	local t = math.clamp(w / maxW, 0, 1)
+local function getHeartPrompt(state)
+	if state.anchor and state.anchor.Parent then
+		local prompt = state.anchor:FindFirstChildOfClass("ProximityPrompt")
+		if prompt then
+			state.prompt = prompt
+			return prompt
+		end
+	end
+	if state.dais and state.dais.Parent then
+		local anchor = state.dais:FindFirstChild("HeartPromptAnchor", true)
+		if anchor then
+			state.anchor = anchor
+			local prompt = anchor:FindFirstChildOfClass("ProximityPrompt")
+			if prompt then
+				state.prompt = prompt
+				return prompt
+			end
+		end
+		local nested = state.dais:FindFirstChildWhichIsA("ProximityPrompt", true)
+		if nested then
+			state.prompt = nested
+			return nested
+		end
+	end
+	return state.prompt
+end
 
+local function getMoteBaseColor(orb)
+	local r = orb:GetAttribute("BaseColorR")
+	local g = orb:GetAttribute("BaseColorG")
+	local b = orb:GetAttribute("BaseColorB")
+	if r and g and b then
+		return Color3.new(r, g, b)
+	end
+	return orb.Color
+end
+
+local function getRemainingDurability(orb)
+	local maxW = orb:GetAttribute("MaxWeakness") or CONFIG.MAX_WEAKNESS
+	local damage = orb:GetAttribute("Weakness") or 0
+	return math.max(0, maxW - damage), maxW
+end
+
+local function applyMoteVisualWeakness(orb)
+	if orb:GetAttribute("Dissolved") == true then
+		return
+	end
+
+	local remaining, maxW = getRemainingDurability(orb)
+	local durabilityRatio = math.clamp(remaining / math.max(maxW, 1), 0, 1)
+
+	local baseColor = getMoteBaseColor(orb)
 	local baseSize = orb:GetAttribute("BaseSize") or 2.2
-	local size = baseSize * (1 - 0.55 * t)
-	orb.Size = Vector3.new(size, size, size)
-	orb.Transparency = 0.05 + 0.55 * t
-	orb.Color = Color3.fromRGB(
-		60 + math.floor(80 * t),
-		180 - math.floor(90 * t),
-		255 - math.floor(40 * t)
-	)
+
+	-- Smooth gradient: bright original → darker → black as durability falls.
+	local darkened = baseColor:Lerp(Color3.new(0, 0, 0), 1 - durabilityRatio)
+	orb.Color = darkened
+	orb.Size = Vector3.new(baseSize, baseSize, baseSize) * (0.75 + 0.25 * durabilityRatio)
+	orb.Transparency = 0.05 + (1 - durabilityRatio) * 0.35
 
 	local light = orb:FindFirstChildOfClass("PointLight")
 	if light then
-		light.Brightness = 2.4 * (1 - 0.85 * t)
-		light.Range = 18 * (1 - 0.5 * t)
+		light.Brightness = 2.4 * durabilityRatio
+		light.Range = 18 * (0.5 + 0.5 * durabilityRatio)
 	end
 
 	local spark = orb:FindFirstChildOfClass("ParticleEmitter")
 	if spark then
-		spark.Rate = 6 * (1 - 0.9 * t)
+		spark.Color = ColorSequence.new(darkened)
+		spark.Rate = 6 * durabilityRatio
 	end
+end
+
+local unlockHeart
+local lockHeart
+local tryUnlockHeart
+
+unlockHeart = function(state)
+	if not state or state.heartPhase == "HEART_CLAIMED" then
+		return
+	end
+	state.heartUnlocked = true
+	state.heartPhase = "HEART_CLAIMABLE"
+	state.dais:SetAttribute(CONFIG.ATTR_UNLOCKED, true)
+	state.dais:SetAttribute(CONFIG.ATTR_ALL_DISSOLVED, true)
+
+	local prompt = getHeartPrompt(state)
+	if prompt then
+		prompt.Enabled = true
+		prompt.ObjectText = "Heart Crystal"
+		prompt.ActionText = "Take the Heart"
+		print("[ROOM C HEART] Claim prompt enabled")
+	else
+		warn("[ROOM C HEART] Heart unlocked but ProximityPrompt was not found")
+	end
+
+	local crystal = state.crystal
+	if crystal then
+		local hl = crystal:FindFirstChildOfClass("Highlight")
+		if not hl then
+			hl = Instance.new("Highlight")
+			hl.FillColor = Color3.fromRGB(255, 220, 80)
+			hl.OutlineColor = Color3.fromRGB(255, 255, 160)
+			hl.FillTransparency = 0.35
+			hl.Parent = crystal
+		end
+		local light = crystal:FindFirstChildOfClass("PointLight")
+		if light then
+			TweenService:Create(light, TweenInfo.new(0.6), { Brightness = 7, Range = 95 }):Play()
+		end
+	end
+
+	print("[ROOM C HEART] Heart Crystal UNLOCKED")
+end
+
+lockHeart = function(state)
+	if not state then
+		return
+	end
+	state.heartUnlocked = false
+	state.heartPhase = "MOTES_ACTIVE"
+	state.dais:SetAttribute(CONFIG.ATTR_UNLOCKED, false)
+	state.dais:SetAttribute(CONFIG.ATTR_ALL_DISSOLVED, false)
+
+	local prompt = getHeartPrompt(state)
+	if prompt then
+		prompt.Enabled = false
+		prompt.ObjectText = "Heart Crystal (Sealed)"
+		prompt.ActionText = "Defeat the motes first"
+	end
+end
+
+tryUnlockHeart = function(state)
+	if not state then
+		return
+	end
+	if state.heartPhase == "HEART_CLAIMED" then
+		return
+	end
+
+	local aliveFolder = countAliveMotes(state.orbFolder)
+	local aliveState = countAliveMotesInState(state)
+	if state.motesRemaining == nil then
+		state.motesRemaining = CONFIG.MOTE_COUNT
+	end
+	state.motesRemaining = math.min(state.motesRemaining, aliveFolder, aliveState)
+
+	if state.motesRemaining > 0 or aliveFolder > 0 or aliveState > 0 then
+		return
+	end
+
+	if state.heartPhase ~= "HEART_CLAIMABLE" then
+		state.heartPhase = "ALL_MOTES_DEFEATED"
+		print("[ROOM C HEART] All motes defeated - unlocking Heart Crystal")
+	end
+	unlockHeart(state)
 end
 
 local function dissolveMote(state, orb)
 	if not orb or orb:GetAttribute("Dissolved") == true then
 		return
 	end
+
+	-- Immediately remove from combat/targeting.
 	orb:SetAttribute("Dissolved", true)
 	orb:SetAttribute("Weakness", orb:GetAttribute("MaxWeakness") or CONFIG.MAX_WEAKNESS)
+	moteRegistry[orb] = nil
 
-	-- Stop per-mote attack loop
 	local moteState = state.motes[orb]
 	if moteState then
 		moteState.alive = false
 	end
+	state.motes[orb] = nil
 
-	-- Dissolution VFX
+	orb.Color = Color3.new(0, 0, 0)
+	orb.CanTouch = false
+	orb.CanQuery = false
+
+	local light = orb:FindFirstChildOfClass("PointLight")
+	if light then
+		TweenService:Create(light, TweenInfo.new(CONFIG.DISSOLVE_DURATION), {
+			Brightness = 0,
+			Range = 0,
+		}):Play()
+	end
+
+	local spark = orb:FindFirstChildOfClass("ParticleEmitter")
+	if spark then
+		spark.Enabled = false
+	end
+
 	local burst = Instance.new("Part")
 	burst.Name = "MoteDissolveBurst"
 	burst.Shape = Enum.PartType.Ball
-	burst.Size = orb.Size * 1.2
+	burst.Size = orb.Size * 1.1
 	burst.CFrame = orb.CFrame
 	burst.Anchored = true
 	burst.CanCollide = false
 	burst.CanQuery = false
 	burst.Material = Enum.Material.Neon
-	burst.Color = Color3.fromRGB(160, 230, 255)
-	burst.Transparency = 0.2
+	burst.Color = Color3.fromRGB(40, 40, 40)
+	burst.Transparency = 0.15
 	burst.Parent = Workspace
 
 	local pe = Instance.new("ParticleEmitter")
-	pe.Texture = "rbxasset://textures/particles/sparkles_main.dds"
-	pe.Color = ColorSequence.new(Color3.fromRGB(120, 210, 255))
-	pe.Size = NumberSequence.new(0.8, 0)
-	pe.Lifetime = NumberRange.new(0.4, 0.9)
+	pe.Texture = "rbxasset://textures/particles/smoke_main.dds"
+	pe.Color = ColorSequence.new(Color3.fromRGB(30, 30, 30))
+	pe.Size = NumberSequence.new(0.6, 0)
+	pe.Lifetime = NumberRange.new(0.3, 0.6)
 	pe.Rate = 0
-	pe.Speed = NumberRange.new(4, 10)
+	pe.Speed = NumberRange.new(2, 6)
 	pe.SpreadAngle = Vector2.new(180, 180)
-	pe.LightEmission = 1
 	pe.Parent = burst
-	pe:Emit(28)
-	Debris:AddItem(burst, 1.2)
+	pe:Emit(16)
+	Debris:AddItem(burst, CONFIG.DISSOLVE_DURATION + 0.3)
 
-	TweenService:Create(orb, TweenInfo.new(0.45), {
+	TweenService:Create(orb, TweenInfo.new(CONFIG.DISSOLVE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
 		Transparency = 1,
-		Size = Vector3.new(0.2, 0.2, 0.2),
+		Size = Vector3.new(0.15, 0.15, 0.15),
 	}):Play()
 
-	task.delay(0.5, function()
+	task.delay(CONFIG.DISSOLVE_DURATION, function()
 		if orb.Parent then
 			orb:Destroy()
 		end
+		-- Unlock only after the mote is actually gone (not mid-dissolve).
+		tryUnlockHeart(state)
 	end)
 
-	print("[ROOM C] Mote fully dissolved (" .. orb.Name .. ")")
 	local remaining = countAliveMotes(state.orbFolder)
-	print("[ROOM C] Remaining motes: " .. tostring(remaining))
+	print("[ROOM A MOTES] Active mote count: " .. tostring(remaining))
 
-	if remaining <= 0 then
-		state.unlockHeart()
+	if state.motesRemaining ~= nil then
+		state.motesRemaining = math.max(0, state.motesRemaining - 1)
 	end
 end
 
@@ -336,74 +679,71 @@ local function startMoteAttackLoop(state, orb, index)
 	end)
 end
 
-local function unlockHeart(state)
-	if state.heartUnlocked then
-		return
+local function applyMoteSpellHit(mote, player, amount)
+	if not mote or not mote.Parent then
+		return false
 	end
-	state.heartUnlocked = true
-	state.dais:SetAttribute(CONFIG.ATTR_UNLOCKED, true)
-	state.dais:SetAttribute(CONFIG.ATTR_ALL_DISSOLVED, true)
-
-	if state.prompt then
-		state.prompt.Enabled = true
-		state.prompt.ObjectText = "Heart Crystal"
-		state.prompt.ActionText = "Take the Heart"
+	if mote:GetAttribute("Dissolved") == true then
+		return false
+	end
+	if not CollectionService:HasTag(mote, "RoomCBlueMote") then
+		return false
 	end
 
-	-- Visual unlock pulse
-	local crystal = state.crystal
-	if crystal then
-		local hl = crystal:FindFirstChildOfClass("Highlight")
-		if not hl then
-			hl = Instance.new("Highlight")
-			hl.FillColor = Color3.fromRGB(255, 220, 80)
-			hl.OutlineColor = Color3.fromRGB(255, 255, 160)
-			hl.FillTransparency = 0.35
-			hl.Parent = crystal
-		end
-		local light = crystal:FindFirstChildOfClass("PointLight")
-		if light then
-			TweenService:Create(light, TweenInfo.new(0.6), { Brightness = 7, Range = 95 }):Play()
-		end
+	local state = resolveEncounterState(mote)
+	local maxW = mote:GetAttribute("MaxWeakness") or CONFIG.MAX_WEAKNESS
+	local prevDamage = mote:GetAttribute("Weakness") or 0
+	local prevRemaining = math.max(0, maxW - prevDamage)
+	local hitAmount = amount or CONFIG.MAX_WEAKNESS / 5
+	local newDamage = math.min(maxW, prevDamage + hitAmount)
+	local newRemaining = math.max(0, maxW - newDamage)
+
+	mote:SetAttribute("Weakness", newDamage)
+
+	print("[ROOM A MOTES] Mote " .. mote.Name .. " hit")
+	print("[ROOM A MOTES] Durability: " .. tostring(prevRemaining) .. " -> " .. tostring(newRemaining))
+
+	applyMoteVisualWeakness(mote)
+	print("[ROOM A MOTES] " .. mote.Name .. " visual updated for durability " .. tostring(newRemaining))
+
+	if player and moteHitRemote then
+		moteHitRemote:FireClient(player, newRemaining, maxW)
+		print("[ROOM A MOTES UI] Showing durability: " .. tostring(newRemaining) .. "/" .. tostring(maxW))
 	end
 
-	print("[ROOM C] All motes dissolved")
-	print("[ROOM C] Heart Crystal UNLOCKED")
-end
-
-local function lockHeart(state)
-	state.heartUnlocked = false
-	state.dais:SetAttribute(CONFIG.ATTR_UNLOCKED, false)
-	state.dais:SetAttribute(CONFIG.ATTR_ALL_DISSOLVED, false)
-	if state.prompt then
-		state.prompt.Enabled = false
-		state.prompt.ObjectText = "Heart Crystal (Sealed)"
-		state.prompt.ActionText = "Defeat the motes first"
-	end
-end
-
-local function onWeaknessChanged(mote, weakness, maxWeakness, _player)
-	local dais = mote:FindFirstAncestor("SacredDais")
-		or (mote.Parent and mote.Parent.Parent)
-	local state = dais and activeEncounters[dais]
-	if not state then
-		-- Try match by orb folder parent
-		for d, s in pairs(activeEncounters) do
-			if s.orbFolder and mote:IsDescendantOf(s.orbFolder) then
-				state = s
-				break
+	if newDamage >= maxW then
+		print("[ROOM A MOTES] " .. mote.Name .. " reached 0 durability")
+		if state then
+			print("[ROOM A MOTES] " .. mote.Name .. " beginning dissolve")
+			dissolveMote(state, mote)
+			print("[ROOM A MOTES] " .. mote.Name .. " removed")
+		else
+			mote:SetAttribute("Dissolved", true)
+			mote.CanTouch = false
+			mote.CanQuery = false
+			mote:Destroy()
+			moteRegistry[mote] = nil
+			if state then
+				if state.motesRemaining ~= nil then
+					state.motesRemaining = math.max(0, state.motesRemaining - 1)
+				end
+				tryUnlockHeart(state)
 			end
 		end
 	end
-	if not state then
+
+	return true
+end
+
+local function onWeaknessChanged(mote, weakness, maxWeakness, player)
+	-- Legacy hook: re-route through the single authoritative hit pipeline.
+	local prevDamage = mote:GetAttribute("Weakness") or 0
+	if weakness <= prevDamage then
 		return
 	end
-
-	applyMoteVisualWeakness(mote)
-
-	if weakness >= maxWeakness then
-		dissolveMote(state, mote)
-	end
+	local delta = weakness - prevDamage
+	mote:SetAttribute("Weakness", prevDamage)
+	applyMoteSpellHit(mote, player, delta)
 end
 
 local function start(dais, opts)
@@ -439,14 +779,19 @@ local function start(dais, opts)
 		orbFolder = orbFolder,
 		prompt = prompt,
 		motes = {},
+		motesRemaining = CONFIG.MOTE_COUNT,
+		heartPhase = "MOTES_ACTIVE",
 		ended = false,
-		heartUnlocked = dais:GetAttribute(CONFIG.ATTR_UNLOCKED) == true,
+		heartUnlocked = false,
 		opts = opts,
 		floatConn = nil,
 		hazardConn = nil,
 	}
 	state.unlockHeart = function()
 		unlockHeart(state)
+	end
+	state.tryUnlockHeart = function()
+		tryUnlockHeart(state)
 	end
 
 	activeEncounters[dais] = state
@@ -462,8 +807,11 @@ local function start(dais, opts)
 		return (a:GetAttribute("MoteIndex") or 0) < (b:GetAttribute("MoteIndex") or 0)
 	end)
 
-	print("[ROOM C] Mote encounter initialized")
-	print("[ROOM C] Mote count: " .. tostring(#moteList))
+	print("[ROOM A MOTES] Active mote count: " .. tostring(#moteList))
+
+	if #moteList ~= CONFIG.MOTE_COUNT then
+		warn("[ROOM A MOTES] Expected " .. CONFIG.MOTE_COUNT .. " motes, found " .. tostring(#moteList))
+	end
 
 	for i, orb in ipairs(moteList) do
 		local idx = orb:GetAttribute("MoteIndex") or (i - 1)
@@ -482,16 +830,24 @@ local function start(dais, opts)
 		if orb:GetAttribute("BaseSize") == nil then
 			orb:SetAttribute("BaseSize", orb.Size.X)
 		end
+		if orb:GetAttribute("BaseColorR") == nil then
+			orb:SetAttribute("BaseColorR", orb.Color.R)
+			orb:SetAttribute("BaseColorG", orb.Color.G)
+			orb:SetAttribute("BaseColorB", orb.Color.B)
+		end
 		orb:SetAttribute("Dissolved", false)
 
 		state.motes[orb] = { alive = true, index = i }
+		moteRegistry[orb] = state
 		applyMoteVisualWeakness(orb)
 		startMoteAttackLoop(state, orb, i)
 	end
 
+	state.motesRemaining = #moteList
+
 	-- Heart locked until all motes dissolve (server-side)
-	if countAliveMotes(orbFolder) <= 0 then
-		unlockHeart(state)
+	if state.motesRemaining <= 0 then
+		tryUnlockHeart(state)
 	else
 		lockHeart(state)
 	end
@@ -504,9 +860,9 @@ local function start(dais, opts)
 			spell = require(mod)
 		end
 	end
-	if spell and spell.ensureSpellTool then
+	if spell and spell.restoreSpellAfterRespawn then
 		for _, player in ipairs(Players:GetPlayers()) do
-			spell.ensureSpellTool(player)
+			spell.restoreSpellAfterRespawn(player)
 		end
 	else
 		warn("[ROOM C] TrialChamberSpellBridge not found — mote weakening spells unavailable")
@@ -563,40 +919,56 @@ local function start(dais, opts)
 		end
 	end)
 
-	-- Contact hazard (rate-limited, throttled query)
-	local contactDebounce = {}
-	local contactAcc = 0
+	-- Orbit-zone hazard: 1 HP/s while inside the mote ring, independent of mote motion.
+	-- Single server loop, one accumulator per player (no Touched spam, no per-frame multi-hit).
+	local hazardInsideTime = {}
+	local hazardRadius = CONFIG.MOTE_BASE_RADIUS
+		+ CONFIG.MOTE_RADIUS_STEP * 2
+		+ CONFIG.MOTE_RADIUS_VAR
+		+ (CONFIG.HAZARD_RADIUS_PAD or 3)
+	local hazardHalfHeight = CONFIG.MOTE_VERTICAL_AMP
+		+ CONFIG.MOTE_SECONDARY_AMP
+		+ (CONFIG.HAZARD_HEIGHT_PAD or 6)
 	state.hazardConn = RunService.Heartbeat:Connect(function(dt)
-		if state.ended or state.heartUnlocked then
+		if state.ended then
 			return
 		end
-		contactAcc += dt
-		if contactAcc < 0.12 then
+		if state.heartUnlocked or countAliveMotesInState(state) <= 0 then
+			for uid in pairs(hazardInsideTime) do
+				hazardInsideTime[uid] = nil
+			end
 			return
 		end
-		contactAcc = 0
-		for orb, moteState in pairs(state.motes) do
-			if moteState.alive and orb.Parent and orb:GetAttribute("Dissolved") ~= true then
-				local overlap = OverlapParams.new()
-				overlap.FilterType = Enum.RaycastFilterType.Exclude
-				overlap.FilterDescendantsInstances = { dais.Parent }
-				local parts = Workspace:GetPartBoundsInRadius(orb.Position, CONFIG.CONTACT_RADIUS, overlap)
-				for _, part in ipairs(parts) do
-					local character = part:FindFirstAncestorOfClass("Model")
-					if character then
-						local humanoid = character:FindFirstChildOfClass("Humanoid")
-						local player = Players:GetPlayerFromCharacter(character)
-						if humanoid and humanoid.Health > 0 and player then
-							local key = player.UserId .. "_" .. orb.Name
-							local last = contactDebounce[key]
-							if not last or (os.clock() - last) >= CONFIG.CONTACT_COOLDOWN then
-								contactDebounce[key] = os.clock()
-								humanoid:TakeDamage(CONFIG.CONTACT_DAMAGE)
-								print("[ROOM C HAZARD] Blue mote damaged " .. player.Name .. " for " .. tostring(CONFIG.CONTACT_DAMAGE))
-							end
-						end
+
+		local center = getHeartCenter(dais, crystal)
+		local seen = {}
+		for _, player in ipairs(Players:GetPlayers()) do
+			local character = player.Character
+			local hrp = character and character:FindFirstChild("HumanoidRootPart")
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			local uid = player.UserId
+			seen[uid] = true
+			if hrp and humanoid and humanoid.Health > 0 then
+				local offset = hrp.Position - center
+				local horiz = Vector3.new(offset.X, 0, offset.Z).Magnitude
+				local vert = math.abs(offset.Y)
+				if horiz <= hazardRadius and vert <= hazardHalfHeight then
+					hazardInsideTime[uid] = (hazardInsideTime[uid] or 0) + dt
+					if hazardInsideTime[uid] >= CONFIG.HAZARD_INTERVAL then
+						hazardInsideTime[uid] = 0
+						humanoid:TakeDamage(CONFIG.HAZARD_DAMAGE)
+						print("[ROOM C HAZARD] Mote orbit damaged " .. player.Name .. " for " .. tostring(CONFIG.HAZARD_DAMAGE))
 					end
+				else
+					hazardInsideTime[uid] = 0
 				end
+			else
+				hazardInsideTime[uid] = 0
+			end
+		end
+		for uid in pairs(hazardInsideTime) do
+			if not seen[uid] then
+				hazardInsideTime[uid] = nil
 			end
 		end
 	end)
@@ -620,7 +992,11 @@ local function start(dais, opts)
 			end
 
 			-- Consume prompt once
-			prompt.Enabled = false
+			local prompt = getHeartPrompt(state)
+			if prompt then
+				prompt.Enabled = false
+			end
+			state.heartPhase = "HEART_CLAIMED"
 			state.ended = true
 			for _, moteState in pairs(state.motes) do
 				moteState.alive = false
@@ -687,6 +1063,11 @@ local function start(dais, opts)
 				state.hazardConn:Disconnect()
 			end
 			activeEncounters[dais] = nil
+			for orb, encounterState in pairs(moteRegistry) do
+				if encounterState == state then
+					moteRegistry[orb] = nil
+				end
+			end
 		end
 	end)
 end
@@ -695,7 +1076,10 @@ local API = {
 	CONFIG = CONFIG,
 	start = start,
 	onWeaknessChanged = onWeaknessChanged,
+	applyMoteSpellHit = applyMoteSpellHit,
 }
+
+ensureMoteDurabilityUISystem()
 
 _G.RoomCMoteEncounter = API
 
