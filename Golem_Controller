@@ -21,18 +21,21 @@ local GOLEM_ANIMS = {
 		Walk = "rbxassetid://136845859551530", -- Injured Walk
 		Attack = "rbxassetid://76120321691854", -- Charged Upward Slash
 		AttackHitTime = 0.58,
+		Death = "rbxassetid://125311096602434",
 	},
 	GreenGolem = {
 		Walk = "rbxassetid://132075673875346", -- Monster Walk
 		Attack = "rbxassetid://71648314202709", -- Charged Spell Cast
 		AttackAlt = "rbxassetid://70905402782573", -- Mage Spell Cast 6
 		AttackHitTime = 0.62,
+		Death = "rbxassetid://88104219808405",
 	},
 	StoneGolem = {
 		Walk = "rbxassetid://90296869286977", -- Unsteady Walk (published)
 		Attack = "rbxassetid://99131819228368", -- Sumash
 		AttackAlt = "rbxassetid://108632342608927", -- Spartan Kick
 		AttackHitTime = 0.52,
+		Death = "rbxassetid://123877373585784",
 	},
 }
 
@@ -46,9 +49,12 @@ local STONE_DROP_HEIGHT = 80
 local STONE_DROP_DURATION = 0.85
 local ARENA_WALL_MARGIN = 6
 
-local ANIM_CROSSFADE = 0.12
-local ANIM_ATTACK_CROSSFADE = 0.08
-local ANIM_WALK_START_FADE = 0.05
+local ANIM_FADE_IDLE_WALK = 0.2
+local ANIM_FADE_WALK_IDLE = 0.2
+local ANIM_FADE_WALK_ATTACK = 0.1
+local ANIM_FADE_ATTACK_WALK = 0.15
+local ANIM_FADE_DEATH = 0.15
+local ATTACK_WINDDOWN_AFTER_HIT = 0.12
 
 local activeConnections = {}
 local encounterStarted = false
@@ -264,10 +270,12 @@ local function preloadGolemAnimations(golem, golemType)
 		golemType = golemType,
 		walk = nil,
 		attack = nil,
+		death = nil,
 	}
 
 	local walkId = getConfiguredAnim(golemType, "Walk")
 	local attackId = getConfiguredAnim(golemType, "Attack")
+	local deathId = getConfiguredAnim(golemType, "Death")
 
 	if walkId then
 		local ok, track = pcall(function()
@@ -299,40 +307,143 @@ local function preloadGolemAnimations(golem, golemType)
 		end
 	end
 
+	if deathId then
+		local ok, track = pcall(function()
+			local anim = Instance.new("Animation")
+			anim.Name = "GolemDeathAnim"
+			anim.AnimationId = deathId
+			local loaded = animator:LoadAnimation(anim)
+			loaded.Priority = Enum.AnimationPriority.Action4
+			loaded.Looped = false
+			return loaded
+		end)
+		if ok then
+			cache.death = track
+		end
+	end
+
 	golemAnimCaches[golem] = cache
 
 	-- Warm lengths in background while dormant.
 	task.spawn(function()
 		waitForTrackLength(cache.walk, 2.0)
 		waitForTrackLength(cache.attack, 2.0)
+		waitForTrackLength(cache.death, 2.0)
 	end)
 
 	return cache
 end
 
-local function playWalkAnimation(cache, fadeTime)
-	if not cache or not cache.walk then
-		return
-	end
-	if not cache.walk.IsPlaying then
-		cache.walk:Play(fadeTime or ANIM_CROSSFADE)
-	end
-end
+-- Single authoritative animation state machine per golem.
+local function createGolemAnimController(golemType, animCache)
+	local animState = "None"
+	local locked = false
 
-local function playAttackAnimation(cache, fadeTime)
-	if not cache or not cache.attack then
+	local function stateLabel(state)
+		if state == "None" then
+			return "IDLE"
+		end
+		return string.upper(state)
+	end
+
+	local function logTransition(fromState, toState)
+		print(string.format("[ROOM B ANIMATION] %s: %s -> %s", golemType, stateLabel(fromState), stateLabel(toState)))
+	end
+
+	local function requestAnimState(state)
+		if locked then
+			return animCache.death
+		end
+		if animState == state then
+			-- Allow a new attack swing once the prior attack track has finished.
+			if state == "Attack" and animCache.attack and not animCache.attack.IsPlaying then
+				animCache.attack:Play(ANIM_FADE_WALK_ATTACK)
+			end
+			return nil
+		end
+
+		local prev = animState
+
+		if state == "Death" then
+			locked = true
+			local fade = ANIM_FADE_DEATH
+			if animCache.attack and animCache.attack.IsPlaying then
+				pcall(function()
+					animCache.attack:Stop(fade)
+				end)
+			end
+			if animCache.walk and animCache.walk.IsPlaying then
+				pcall(function()
+					animCache.walk:Stop(fade)
+				end)
+			end
+			if animCache.death and not animCache.death.IsPlaying then
+				animCache.death:Play(fade)
+			end
+			print(string.format("[ROOM B ANIMATION] %s: -> DYING", golemType))
+			animState = "Death"
+			return animCache.death
+		end
+
+		if state == "Idle" then
+			local fade = ANIM_FADE_WALK_IDLE
+			if prev == "Attack" and animCache.attack and animCache.attack.IsPlaying then
+				pcall(function()
+					animCache.attack:Stop(ANIM_FADE_ATTACK_WALK)
+				end)
+			end
+			if animCache.walk and animCache.walk.IsPlaying then
+				pcall(function()
+					animCache.walk:Stop(fade)
+				end)
+			end
+		elseif state == "Walk" then
+			local fade = ANIM_FADE_ATTACK_WALK
+			if prev == "Attack" and animCache.attack and animCache.attack.IsPlaying then
+				pcall(function()
+					animCache.attack:Stop(fade)
+				end)
+			elseif prev == "Idle" or prev == "None" then
+				fade = ANIM_FADE_IDLE_WALK
+			end
+			if animCache.walk and not animCache.walk.IsPlaying then
+				animCache.walk:Play(fade)
+			end
+		elseif state == "Attack" then
+			local fade = ANIM_FADE_WALK_ATTACK
+			-- Keep walk running underneath; Action priority overrides Movement.
+			if animCache.walk and not animCache.walk.IsPlaying then
+				animCache.walk:Play(ANIM_FADE_IDLE_WALK)
+			end
+			if animCache.attack and not animCache.attack.IsPlaying then
+				animCache.attack:Play(fade)
+			end
+		end
+
+		logTransition(prev, state)
+		animState = state
 		return nil
 	end
-	-- Do NOT stop walk first — Action priority overrides Movement for a seamless blend.
-	cache.attack:Play(fadeTime or ANIM_ATTACK_CROSSFADE)
-	return cache.attack
+
+	return {
+		request = requestAnimState,
+		isLocked = function()
+			return locked
+		end,
+	}
 end
 
-local function stopAttackAnimation(cache, fadeTime)
-	if cache and cache.attack and cache.attack.IsPlaying then
-		pcall(function()
-			cache.attack:Stop(fadeTime or ANIM_ATTACK_CROSSFADE)
-		end)
+local function waitForDeathAnimation(track)
+	if not track then
+		return
+	end
+	if track.IsPlaying then
+		track.Ended:Wait()
+		return
+	end
+	local length = waitForTrackLength(track, 2.0)
+	if length > 0 then
+		task.wait(length)
 	end
 end
 
@@ -1001,36 +1112,88 @@ local function spawnController(golem, golemType, animCache)
 	local lastAttackTime = 0
 	local timeSinceLastUpdate = 0
 	local attackInProgress = false
+	local isDying = false
+	local animCtrl = createGolemAnimController(golemType, animCache)
 
-	-- Walk should already be playing from activateGolem; ensure regardless.
-	playWalkAnimation(animCache, ANIM_WALK_START_FADE)
+	animCtrl.request("Walk")
 
-	local function setState(newState)
+	local function setAIState(newState)
+		if isDying or animCtrl.isLocked() then
+			return
+		end
 		if currentState == newState then
 			return
 		end
-		local prevState = currentState
 		currentState = newState
 		print("[ROOM B AI] " .. golemType .. " -> " .. string.upper(newState))
 
-		if newState == "Idle" or newState == "Dead" then
-			if animCache.walk and animCache.walk.IsPlaying then
-				pcall(function()
-					animCache.walk:Stop(ANIM_CROSSFADE)
-				end)
-			end
-			stopAttackAnimation(animCache, ANIM_ATTACK_CROSSFADE)
+		if newState == "Idle" then
+			animCtrl.request("Idle")
 		elseif newState == "Chasing" then
-			-- Resume walk immediately after attack — crossfade, never an idle gap.
-			playWalkAnimation(animCache, ANIM_CROSSFADE)
+			animCtrl.request("Walk")
 		elseif newState == "Attacking" then
-			-- Keep walk running underneath; Action priority handles the visual override.
+			animCtrl.request("Attack")
 		end
+	end
 
-		if prevState == "Attacking" and newState == "Chasing" then
-			stopAttackAnimation(animCache, ANIM_ATTACK_CROSSFADE)
-			playWalkAnimation(animCache, ANIM_CROSSFADE)
+	local function beginDeathSequence()
+		if isDying then
+			return
 		end
+		isDying = true
+		currentState = "Dying"
+		golem:SetAttribute("IsActive", false)
+		golem:SetAttribute("AIStarted", false)
+		print("[ROOM B AI] " .. golemType .. " -> DYING")
+		print("[ROOM B COMBAT] " .. golemType .. " defeated")
+		print("[ROOM B GOLEMS] " .. golemType .. " defeated")
+
+		clearConnection(golemType)
+
+		task.spawn(function()
+			local track = animCtrl.request("Death")
+			if track then
+				waitForDeathAnimation(track)
+			end
+			clearGolemAnimCache(golem)
+			currentState = "Dead"
+
+			if golemType == "SkeliGolem" then
+				_G.SkeliDefeated = true
+				print("[ROOM B GOLEMS] Activating existing GreenGolem")
+				local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+				local green = container and container:FindFirstChild("GreenGolem")
+				if green then
+					task.delay(0.75, function()
+						if green.Parent and Controller and Controller.activateGolem then
+							Controller.activateGolem(green, "GreenGolem")
+						end
+					end)
+				else
+					warn("[ROOM B ERROR] GreenGolem missing after Skeli defeat!")
+				end
+			elseif golemType == "GreenGolem" then
+				_G.GreenDefeated = true
+				print("[ROOM B GOLEMS] GreenGolem defeated — scheduling StoneGolem entrance")
+				task.delay(1.0, function()
+					beginStoneSkyDropEntrance()
+				end)
+			elseif golemType == "StoneGolem" then
+				_G.StoneDefeated = true
+				print("[PROGRESSION] StoneGolem defeated")
+				print("[ROOM B GOLEMS] StoneGolem defeated")
+				for _, plr in ipairs(Players:GetPlayers()) do
+					if _G.TrialSpell and type(_G.TrialSpell.unlockSpell) == "function" then
+						_G.TrialSpell.unlockSpell(plr)
+					end
+				end
+				checkRoomBCompletion()
+			end
+
+			if golem and golem.Parent then
+				golem:Destroy()
+			end
+		end)
 	end
 
 	local function getNearestPlayer(position, maxDistance)
@@ -1067,53 +1230,11 @@ local function spawnController(golem, golemType, animCache)
 
 		local currentHealth = golem:GetAttribute("Health") or 0
 		if currentHealth <= 0 then
-			if currentState ~= "Dead" then
-				setState("Dead")
-				golem:SetAttribute("IsActive", false)
-				golem:SetAttribute("AIStarted", false)
-				print("[ROOM B AI] " .. golemType .. " -> DEAD")
-				print("[ROOM B COMBAT] " .. golemType .. " defeated")
-				print("[ROOM B GOLEMS] " .. golemType .. " defeated")
-
-				clearConnection(golemType)
-				clearGolemAnimCache(golem)
-
-				if golemType == "SkeliGolem" then
-					_G.SkeliDefeated = true
-					print("[ROOM B GOLEMS] Activating existing GreenGolem")
-					local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
-					local green = container and container:FindFirstChild("GreenGolem")
-					if green then
-						task.delay(0.75, function()
-							if green.Parent and Controller and Controller.activateGolem then
-								Controller.activateGolem(green, "GreenGolem")
-							end
-						end)
-					else
-						warn("[ROOM B ERROR] GreenGolem missing after Skeli defeat!")
-					end
-				elseif golemType == "GreenGolem" then
-					_G.GreenDefeated = true
-					print("[ROOM B GOLEMS] GreenGolem defeated — scheduling StoneGolem entrance")
-					task.delay(1.0, function()
-						beginStoneSkyDropEntrance()
-					end)
-				elseif golemType == "StoneGolem" then
-					_G.StoneDefeated = true
-					print("[ROOM B GOLEMS] StoneGolem defeated")
-					checkRoomBCompletion()
-				end
-
-				task.delay(2, function()
-					if golem and golem.Parent then
-						golem:Destroy()
-					end
-				end)
-			end
+			beginDeathSequence()
 			return
 		end
 
-		if currentState == "Dead" then
+		if isDying or currentState == "Dying" or currentState == "Dead" then
 			return
 		end
 
@@ -1132,10 +1253,10 @@ local function spawnController(golem, golemType, animCache)
 				if targetPlayer then
 					print("[ROOM B GOLEMS] " .. golemType .. " target acquired: " .. targetPlayer.Name)
 					if currentState == "Idle" then
-						setState("Chasing")
+						setAIState("Chasing")
 					end
 				elseif currentState ~= "Attacking" then
-					setState("Idle")
+					setAIState("Idle")
 				end
 			end
 		end
@@ -1143,8 +1264,8 @@ local function spawnController(golem, golemType, animCache)
 		-- Immediate target on first frames — don't wait for target swap event.
 		if not targetPlayer then
 			targetPlayer = getNearestPlayer(root.Position, 1000)
-			if targetPlayer and currentState == "Chasing" then
-				playWalkAnimation(animCache, ANIM_WALK_START_FADE)
+			if targetPlayer and currentState == "Idle" then
+				setAIState("Chasing")
 			end
 		end
 
@@ -1167,30 +1288,21 @@ local function spawnController(golem, golemType, animCache)
 		end
 
 		if currentState == "Idle" or currentState == "Chasing" then
-			playWalkAnimation(animCache, ANIM_CROSSFADE)
-
 			if dist <= ATTACK_RANGE then
 				if not attackInProgress and tick() - lastAttackTime >= ATTACK_COOLDOWN then
 					attackInProgress = true
-					setState("Attacking")
+					setAIState("Attacking")
 					print("[ROOM B COMBAT] " .. golemType .. " attack started")
-
-					local track = playAttackAnimation(animCache, ANIM_ATTACK_CROSSFADE)
-					if track then
-						print("[ROOM B ANIMATION] Attack IsPlaying = " .. tostring(track.IsPlaying))
-					else
-						warn("[ROOM B ANIMATION] " .. golemType .. " ATTACK track failed to play")
-					end
 
 					task.spawn(function()
 						local attackHitFraction = getAttackHitFraction(golemType)
+						local track = animCache.attack
 						local trackLength = waitForTrackLength(track, 0.5)
-						print("[ROOM B ANIMATION] Attack track length: " .. string.format("%.2f", trackLength))
 
 						local damageDelay = trackLength * attackHitFraction
 						task.wait(damageDelay)
 
-						if golem.Parent and golem:GetAttribute("IsActive") and targetPlayer and targetPlayer.Character then
+						if not isDying and golem.Parent and golem:GetAttribute("IsActive") and targetPlayer and targetPlayer.Character then
 							local targetHum = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
 							local tRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
 								or targetPlayer.Character.PrimaryPart
@@ -1206,19 +1318,19 @@ local function spawnController(golem, golemType, animCache)
 							end
 						end
 
-						local remaining = math.max(0, trackLength - damageDelay)
-						task.wait(remaining)
+						task.wait(ATTACK_WINDDOWN_AFTER_HIT)
 
 						attackInProgress = false
 						lastAttackTime = tick()
 
-						if golem.Parent and golem:GetAttribute("IsActive") then
-							setState("Chasing")
+						if not isDying and golem.Parent and golem:GetAttribute("IsActive") then
+							currentState = "Chasing"
+							animCtrl.request("Walk")
 						end
 					end)
 				end
 			else
-				setState("Chasing")
+				setAIState("Chasing")
 			end
 
 			if currentState == "Chasing" then
@@ -1360,10 +1472,6 @@ function Controller.activateGolem(golem, golemType)
 	local animCache = preloadGolemAnimations(golem, golemType)
 	print("[ROOM B ANIMATION] " .. golemType .. " Walk = " .. tostring(getConfiguredAnim(golemType, "Walk")))
 	print("[ROOM B ANIMATION] " .. golemType .. " Attack = " .. tostring(getConfiguredAnim(golemType, "Attack")))
-
-	-- Start walk immediately on activation — do not wait for first Heartbeat tick.
-	playWalkAnimation(animCache, ANIM_WALK_START_FADE)
-	print("[ROOM B ANIMATION] Walk started on activation")
 
 	spawnController(golem, golemType, animCache)
 end
