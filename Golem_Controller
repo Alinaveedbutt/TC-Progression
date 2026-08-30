@@ -67,6 +67,7 @@ local golemAnimCaches = {}
 local spawnSingleGolem
 local beginStoneSkyDropEntrance
 local Controller
+local ensureGateBCCloseWatcher
 
 pcall(function()
 	PhysicsService:RegisterCollisionGroup("RoomBGolems")
@@ -923,6 +924,126 @@ local function openGateBC()
 
 	TweenService:Create(cframeValL, tweenInfo, { Value = targetL }):Play()
 	TweenService:Create(cframeValR, tweenInfo, { Value = targetR }):Play()
+
+	ensureGateBCCloseWatcher()
+end
+
+local gateBCCloseConn = nil
+local gateBCClosing = false
+
+local function playerCrossedGateBC(rootPart, leafL)
+	if not rootPart or not leafL then
+		return false
+	end
+	local gatePos = leafL:GetPivot().Position
+	-- Same rule as Gate_AB: 12 studs past the door.
+	if rootPart.Position.Z > gatePos.Z + 12 then
+		return true
+	end
+	local chamber = Workspace:FindFirstChild("TrialChamberGeneratedV5_Sky")
+		or Workspace:FindFirstChild("TrialChamberActive")
+		or Workspace:FindFirstChild("TrialChamberV2")
+	if chamber then
+		local pivot = chamber:GetPivot()
+		local playerZ = pivot:PointToObjectSpace(rootPart.Position).Z
+		local gateZ = pivot:PointToObjectSpace(gatePos).Z
+		if playerZ > gateZ + 12 then
+			return true
+		end
+	end
+	return false
+end
+
+local function closeGateBCFromThreshold()
+	if gateBCClosing or _G.GateBCSealed then
+		return
+	end
+	if not (gateBCOpened or _G.GateBCOpened) then
+		return
+	end
+
+	local gateBC = findGateBC()
+	if not gateBC then
+		return
+	end
+	local leafL = gateBC:FindFirstChild("DoorLeaf_L")
+	local leafR = gateBC:FindFirstChild("DoorLeaf_R")
+	if not leafL or not leafR then
+		return
+	end
+
+	local closedL = _G.GateBCClosedCFrameL
+	local closedR = _G.GateBCClosedCFrameR
+	if not closedL or not closedR then
+		warn("[ROOM B] Gate BC close skipped — closed pose missing")
+		return
+	end
+
+	gateBCClosing = true
+	_G.GateBCSealed = true
+	print("[RoomC] PLAYER CROSSED GATE_BC THRESHOLD — closing and locking")
+
+	local tweenInfo = TweenInfo.new(2.5, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out)
+	local cframeValL = Instance.new("CFrameValue")
+	cframeValL.Value = leafL:GetPivot()
+	cframeValL.Changed:Connect(function()
+		leafL:PivotTo(cframeValL.Value)
+	end)
+	local cframeValR = Instance.new("CFrameValue")
+	cframeValR.Value = leafR:GetPivot()
+	cframeValR.Changed:Connect(function()
+		leafR:PivotTo(cframeValR.Value)
+	end)
+	local tweenL = TweenService:Create(cframeValL, tweenInfo, { Value = closedL })
+	tweenL.Completed:Connect(function()
+		print("[RoomC] GATE_BC sealed")
+	end)
+	tweenL:Play()
+	TweenService:Create(cframeValR, tweenInfo, { Value = closedR }):Play()
+end
+
+ensureGateBCCloseWatcher = function()
+	if gateBCCloseConn then
+		return
+	end
+	gateBCCloseConn = RunService.Heartbeat:Connect(function()
+		if _G.GateBCSealed then
+			if gateBCCloseConn then
+				gateBCCloseConn:Disconnect()
+				gateBCCloseConn = nil
+			end
+			return
+		end
+		if not (gateBCOpened or _G.GateBCOpened) then
+			return
+		end
+
+		local gateBC = findGateBC()
+		local leafL = gateBC and gateBC:FindFirstChild("DoorLeaf_L")
+		if not leafL then
+			return
+		end
+
+		for _, player in ipairs(Players:GetPlayers()) do
+			local character = player.Character
+			local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+			if rootPart and playerCrossedGateBC(rootPart, leafL) then
+				closeGateBCFromThreshold()
+				if _G.TrialChamberRespawn and _G.TrialChamberRespawn.setCheckpoint then
+					_G.TrialChamberRespawn.setCheckpoint(player, "C")
+				else
+					player:SetAttribute("CurrentTrialRoom", "C")
+				end
+				if _G.TrialSpell and type(_G.TrialSpell.unlockSpell) == "function" then
+					_G.TrialSpell.unlockSpell(player)
+				end
+				if _G.TrialSpell and type(_G.TrialSpell.orderHotbar) == "function" then
+					_G.TrialSpell.orderHotbar(player)
+				end
+				break
+			end
+		end
+	end)
 end
 
 local function checkRoomBCompletion()
@@ -1567,5 +1688,31 @@ end
 
 _G.TrialChamberGolemController = Controller
 _G.GolemController = Controller
+
+task.defer(function()
+	local gate = findGateBC()
+	if gate and not _G.GateBCOpened then
+		local leafL = gate:FindFirstChild("DoorLeaf_L")
+		local leafR = gate:FindFirstChild("DoorLeaf_R")
+		if leafL and leafR and not _G.GateBCClosedCFrameL then
+			_G.GateBCClosedCFrameL = leafL:GetPivot()
+			_G.GateBCClosedCFrameR = leafR:GetPivot()
+		end
+	end
+	ensureGateBCCloseWatcher()
+
+	local sss = game:GetService("ServerScriptService")
+	for _, name in ipairs({
+		"RoomCMoteEncounter",
+		"Room_C_Motes",
+		"TrialChamberSpellBridge",
+		"RoomC_Attack_Spell",
+	}) do
+		local inst = sss:FindFirstChild(name)
+		if inst and inst:IsA("ModuleScript") then
+			pcall(require, inst)
+		end
+	end
+end)
 
 return Controller
