@@ -13,16 +13,18 @@ local Workspace = game:GetService("Workspace")
 local Debris = game:GetService("Debris")
 local TweenService = game:GetService("TweenService")
 local ServerScriptService = game:GetService("ServerScriptService")
+local RunService = game:GetService("RunService")
 
 ------------------------------------------------------------------------
 -- Configurable balance (Room C ~1 minute encounter)
 ------------------------------------------------------------------------
 local CONFIG = {
-	TOOL_NAME = "TrialArcaneFocus",
+	TOOL_NAME = "MagicSpell",
+	LEGACY_TOOL_NAME = "TrialArcaneFocus",
 	SPELL_COOLDOWN = 0.55,
 	SPELL_RANGE = 70,
 	SPELL_HIT_RADIUS = 5.5,
-	SPELL_WEAKNESS = 20, -- spell → mote only; 5 hits to dissolve at 100 max
+	SPELL_WEAKNESS = 50, -- attack power 2: two hits to dissolve at 100 max
 	VISUAL_COLOR = Color3.fromRGB(180, 230, 255),
 	ATTR_HAS_SPELL = "HasTrialArcaneSpell",
 }
@@ -95,63 +97,43 @@ local function spawnCastVisual(origin, targetPos)
 		return
 	end
 
-	-- Soft arcane bolt trail (not a solid neon laser rod)
-	local att0 = Instance.new("Attachment")
-	att0.WorldPosition = origin
-	att0.Parent = workspace.Terrain
-
-	local att1 = Instance.new("Attachment")
-	att1.WorldPosition = targetPos
-	att1.Parent = workspace.Terrain
-
-	local beam = Instance.new("Beam")
-	beam.Name = "TrialSpellBolt"
-	beam.Attachment0 = att0
-	beam.Attachment1 = att1
-	beam.FaceCamera = true
-	beam.Width0 = 0.45
-	beam.Width1 = 0.12
-	beam.LightEmission = 1
-	beam.LightInfluence = 0
-	beam.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.15),
-		NumberSequenceKeypoint.new(0.7, 0.35),
-		NumberSequenceKeypoint.new(1, 1),
-	})
-	beam.Color = ColorSequence.new(CONFIG.VISUAL_COLOR, Color3.fromRGB(255, 255, 255))
-	beam.Segments = 10
-	beam.Parent = att0
-
+	-- Short spark burst at the hit point (no laser rod).
 	local flash = Instance.new("Part")
 	flash.Name = "TrialSpellFlash"
 	flash.Shape = Enum.PartType.Ball
-	flash.Size = Vector3.new(0.6, 0.6, 0.6)
+	flash.Size = Vector3.new(0.45, 0.45, 0.45)
 	flash.Material = Enum.Material.Neon
 	flash.Color = CONFIG.VISUAL_COLOR
 	flash.Anchored = true
 	flash.CanCollide = false
 	flash.CanQuery = false
-	flash.Transparency = 0.2
+	flash.Transparency = 0.15
 	flash.CFrame = CFrame.new(targetPos)
 	flash.Parent = Workspace
 
+	local sparks = Instance.new("ParticleEmitter")
+	sparks.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	sparks.Rate = 0
+	sparks.Lifetime = NumberRange.new(0.2, 0.4)
+	sparks.Speed = NumberRange.new(3, 8)
+	sparks.Size = NumberSequence.new(0.3, 0)
+	sparks.SpreadAngle = Vector2.new(180, 180)
+	sparks.Color = ColorSequence.new(CONFIG.VISUAL_COLOR)
+	sparks.LightEmission = 1
+	sparks.Parent = flash
+	sparks:Emit(12)
+
 	local light = Instance.new("PointLight")
 	light.Color = CONFIG.VISUAL_COLOR
-	light.Brightness = 2
-	light.Range = 10
+	light.Brightness = 1.8
+	light.Range = 8
 	light.Parent = flash
 
-	Debris:AddItem(att0, 0.2)
-	Debris:AddItem(att1, 0.2)
-	Debris:AddItem(flash, 0.22)
-	task.delay(0.05, function()
-		if flash.Parent then
-			TweenService:Create(flash, TweenInfo.new(0.15), {
-				Size = Vector3.new(1.6, 1.6, 1.6),
-				Transparency = 1,
-			}):Play()
-		end
-	end)
+	Debris:AddItem(flash, 0.35)
+	TweenService:Create(flash, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size = Vector3.new(1.4, 1.4, 1.4),
+		Transparency = 1,
+	}):Play()
 end
 
 local function castTowardLook(player)
@@ -221,17 +203,85 @@ local function bindSpellTool(tool, player)
 	end)
 end
 
-local function playerHasSpellTool(player)
+local function findNamedTool(player, name)
 	local backpack = player:FindFirstChild("Backpack")
-	if backpack and backpack:FindFirstChild(CONFIG.TOOL_NAME) then
-		return true
+	if backpack then
+		local tool = backpack:FindFirstChild(name)
+		if tool then
+			return tool
+		end
 	end
 	local character = player.Character
-	if character and character:FindFirstChild(CONFIG.TOOL_NAME) then
-		return true
+	if character then
+		return character:FindFirstChild(name)
 	end
-	return false
+	return nil
 end
+
+local function findSpellTool(player)
+	if not player then
+		return nil
+	end
+	local tool = findNamedTool(player, CONFIG.TOOL_NAME)
+		or findNamedTool(player, CONFIG.LEGACY_TOOL_NAME)
+	if tool and tool.Name ~= CONFIG.TOOL_NAME then
+		tool.Name = CONFIG.TOOL_NAME
+	end
+	return tool
+end
+
+local function playerHasSpellTool(player)
+	return findSpellTool(player) ~= nil
+end
+
+local SWORD_NAME = "GolemBaneSword"
+
+local function orderHotbar(player)
+	if not player then
+		return
+	end
+	local backpack = player:FindFirstChild("Backpack")
+	local character = player.Character
+	if not backpack then
+		return
+	end
+
+	local function findTool(name)
+		if backpack:FindFirstChild(name) then
+			return backpack:FindFirstChild(name)
+		end
+		if character then
+			return character:FindFirstChild(name)
+		end
+		return nil
+	end
+
+	local sword = findTool(SWORD_NAME)
+	local spell = findTool(CONFIG.TOOL_NAME) or findTool(CONFIG.LEGACY_TOOL_NAME)
+	if spell and spell.Name ~= CONFIG.TOOL_NAME then
+		spell.Name = CONFIG.TOOL_NAME
+	end
+	if not sword and not spell then
+		return
+	end
+
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid:UnequipTools()
+	end
+
+	-- Slot 1 = GolemBaneSword, slot 2 = MagicSpell.
+	if sword then
+		sword.Parent = nil
+		sword.Parent = backpack
+	end
+	if spell then
+		spell.Parent = nil
+		spell.Parent = backpack
+	end
+end
+
+local hotbarOrdered = {}
 
 local function ensureSpellTool(player)
 	if not player then
@@ -249,7 +299,7 @@ local function ensureSpellTool(player)
 	tool.Name = CONFIG.TOOL_NAME
 	tool.RequiresHandle = true
 	tool.CanBeDropped = false
-	tool.ToolTip = "Arcane Focus — weaken Room C motes"
+	tool.ToolTip = "Magic Spell — weaken Room C motes"
 
 	local handle = Instance.new("Part")
 	handle.Name = "Handle"
@@ -291,7 +341,8 @@ local function ensureSpellTool(player)
 	end
 
 	tool.Parent = backpack
-	print("[ROOM C] TrialArcaneFocus granted to " .. player.Name)
+	print("[ROOM C] MagicSpell granted to " .. player.Name)
+	orderHotbar(player)
 	return tool
 end
 
@@ -316,6 +367,7 @@ local function restoreSpellAfterRespawn(player)
 	end
 	print("[PROGRESSION] Respawn restoration: Spell = TRUE")
 	ensureSpellTool(player)
+	orderHotbar(player)
 end
 
 local hookedSpellPlayers = {}
@@ -327,6 +379,7 @@ local function hookPlayerSpellPersistence(player)
 	hookedSpellPlayers[player] = true
 
 	player.CharacterAdded:Connect(function(_character)
+		hotbarOrdered[player.UserId] = nil
 		task.defer(function()
 			local backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 8)
 			if not backpack then
@@ -352,11 +405,45 @@ Players.PlayerAdded:Connect(function(player)
 end)
 Players.PlayerRemoving:Connect(function(player)
 	castCooldown[player.UserId] = nil
+	hotbarOrdered[player.UserId] = nil
 	hookedSpellPlayers[player] = nil
 end)
 for _, player in ipairs(Players:GetPlayers()) do
 	hookPlayerSpellPersistence(player)
 end
+
+-- Grant MagicSpell the moment the player crosses into Room C (doorway),
+-- not after walking to the Heart. Slot 1 sword / slot 2 spell.
+local ROOM_C_ENTRY_LOCAL_Z = 425
+local grantAcc = 0
+RunService.Heartbeat:Connect(function(dt)
+	grantAcc += dt
+	if grantAcc < 0.2 then
+		return
+	end
+	grantAcc = 0
+
+	local root = Workspace:FindFirstChild("TrialChamberGeneratedV5_Sky")
+		or Workspace:FindFirstChild("TrialChamberActive")
+		or Workspace:FindFirstChild("TrialChamberV2")
+	if not root then
+		return
+	end
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local z = root:GetPivot():PointToObjectSpace(hrp.Position).Z
+			if z >= ROOM_C_ENTRY_LOCAL_Z then
+				unlockSpell(player)
+				if not hotbarOrdered[player.UserId] then
+					hotbarOrdered[player.UserId] = true
+					orderHotbar(player)
+				end
+			end
+		end
+	end
+end)
 
 local API = {
 	CONFIG = CONFIG,
@@ -364,6 +451,7 @@ local API = {
 	unlockSpell = unlockSpell,
 	ensureSpellTool = ensureSpellTool,
 	restoreSpellAfterRespawn = restoreSpellAfterRespawn,
+	orderHotbar = orderHotbar,
 	applyWeaknessToMote = applyWeaknessToMote,
 	onSpellHitMote = applyWeaknessToMote, -- alias for future real spell system
 }
