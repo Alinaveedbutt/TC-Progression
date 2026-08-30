@@ -1498,9 +1498,9 @@ function RoomC.build(parent)
 	-- ProximityPrompt on a separate invisible part (avoids Script-on-Part rod artifact)
 	local promptAnchor = GeometryCore.newPart({
 		Name = "HeartPromptAnchor",
-		Size = Vector3.new(6, 6, 6),
+		Size = Vector3.new(8, 8, 8),
 		CFrame = CFrame.new(heartCenter),
-		Transparency = 1, CanCollide = false,
+		Transparency = 1, CanCollide = false, CanQuery = true,
 		Parent = daisFolder
 	}, "decorative")
 	local prompt = Instance.new("ProximityPrompt")
@@ -1526,7 +1526,7 @@ function RoomC.build(parent)
 		SIZE = 2.2,
 		CONTACT_DAMAGE = 18,
 		CONTACT_COOLDOWN = 0.75,
-		MAX_WEAKNESS = 100,
+		MAX_WEAKNESS = 100, -- 2 spell hits at SPELL_WEAKNESS=50
 	}
 	local orbFolder = GeometryCore.newFolder(daisFolder, "ArcaneOrbs")
 	local numOrbs = ROOM_C_MOTE.COUNT
@@ -1599,11 +1599,11 @@ function RoomC.build(parent)
 		prompt.ActionText = "Defeat the motes first"
 	end
 
-	-- Safe Room C respawn south of the Heart (clear of motes / dais)
+	-- Room C respawn / spell grant: right at the south doorway (not deep by the Heart).
 	createRoomCheckpoint(
 		folder,
 		"RoomCCheckpoint",
-		pos + Vector3.new(0, 3, -(ap - 16)),
+		pos + Vector3.new(0, 3, -(ap - 2)),
 		Vector3.new(0, 0, 1)
 	)
 
@@ -1883,7 +1883,9 @@ function RoomC.build(parent)
 
 		local encounter = _G.RoomCMoteEncounter
 		if not encounter then
-			local mod = game:GetService("ServerScriptService"):FindFirstChild("RoomCMoteEncounter")
+			local sss = game:GetService("ServerScriptService")
+			local mod = sss:FindFirstChild("RoomCMoteEncounter")
+				or sss:FindFirstChild("Room_C_Motes")
 			if mod and mod:IsA("ModuleScript") then
 				local ok, result = pcall(require, mod)
 				if ok then
@@ -3121,6 +3123,22 @@ function RoomD.build(parent)
 		pLight.Shadows = false
 		pLight.Parent = ambientNode
 	end
+
+	-- Solid landing at the chasm mouth so death in Room D respawns here (not Room C).
+	GeometryCore.newPart({
+		Name = "RoomDSpawnPad",
+		Size = Vector3.new(14, 2, 14),
+		CFrame = CFrame.new(pos.X, rDef.y + 1, rDef.zStart + 8),
+		Material = floorMat,
+		Color = floorCol,
+		Parent = folder,
+	}, "structural")
+	createRoomCheckpoint(
+		folder,
+		"RoomDCheckpoint",
+		Vector3.new(pos.X, rDef.y + 5, rDef.zStart + 8),
+		Vector3.new(0, 0, 1)
+	)
 
 	return folder
 end
@@ -4661,9 +4679,21 @@ local function setupGateBCAnimation(root)
 			local character = player.Character
 			local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 			if rootPart then
-				local ROOM_C_ENTRY_Z = gateZ + 14
-				if rootPart.Position.Z > ROOM_C_ENTRY_Z then
+				if _G.GateBCSealed then
+					doorClosed = true
+					break
+				end
+				-- Same rule as Gate_AB: 12 studs past the live leaf Z, plus chamber-local backup.
+				local liveGateZ = leafL:GetPivot().Position.Z
+				local crossed = rootPart.Position.Z > (liveGateZ + 12)
+				if not crossed then
+					local localPlayerZ = root:GetPivot():PointToObjectSpace(rootPart.Position).Z
+					local localGateZ = root:GetPivot():PointToObjectSpace(leafL:GetPivot().Position).Z
+					crossed = localPlayerZ > (localGateZ + 12)
+				end
+				if crossed then
 					closeDoor()
+					_G.GateBCSealed = true
 					if _G.TrialChamberRespawn and _G.TrialChamberRespawn.setCheckpoint then
 						_G.TrialChamberRespawn.setCheckpoint(player, "C")
 					else
@@ -4674,6 +4704,9 @@ local function setupGateBCAnimation(root)
 						_G.TrialSpell.unlockSpell(player)
 					elseif _G.TrialSpell and type(_G.TrialSpell.ensureSpellTool) == "function" then
 						_G.TrialSpell.ensureSpellTool(player)
+					end
+					if _G.TrialSpell and type(_G.TrialSpell.orderHotbar) == "function" then
+						_G.TrialSpell.orderHotbar(player)
 					end
 					break
 				end
@@ -4728,12 +4761,15 @@ local function setupRoomCheckpointTracking(root)
 			end
 		end
 
-		-- Room C spell focus — only when checkpoint actually advances to C
+		-- Room C spell focus — as soon as checkpoint advances to C (doorway)
 		if roomKey == "C" and _G.TrialSpell then
 			if type(_G.TrialSpell.unlockSpell) == "function" then
 				_G.TrialSpell.unlockSpell(player)
 			elseif type(_G.TrialSpell.ensureSpellTool) == "function" then
 				_G.TrialSpell.ensureSpellTool(player)
+			end
+			if type(_G.TrialSpell.orderHotbar) == "function" then
+				_G.TrialSpell.orderHotbar(player)
 			end
 		end
 	end
@@ -4741,7 +4777,8 @@ local function setupRoomCheckpointTracking(root)
 	local cpA = root:FindFirstChild("RoomACheckpoint", true)
 	local cpB = root:FindFirstChild("RoomBCheckpoint", true)
 	local cpC = root:FindFirstChild("RoomCCheckpoint", true)
-	if not (cpA or cpB or cpC) then
+	local cpD = root:FindFirstChild("RoomDCheckpoint", true)
+	if not (cpA or cpB or cpC or cpD) then
 		warn("[TRIAL RESPAWN] No room checkpoint markers found under chamber")
 		return
 	end
@@ -4758,16 +4795,20 @@ local function setupRoomCheckpointTracking(root)
 		for _, player in ipairs(Players:GetPlayers()) do
 			local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 			if hrp then
-				local z = hrp.Position.Z
-				-- Trial progresses roughly +Z; markers sit just inside each room.
-				if cpA and z >= (cpA.Position.Z - 2) then
+				-- Use chamber-local Z so rotation/pivot cannot send Room D deaths back to C.
+				local localPos = root:GetPivot():PointToObjectSpace(hrp.Position)
+				local z = localPos.Z
+				if z >= -10 and z < 270 then
 					setCp(player, "A")
 				end
-				if cpB and z >= (cpB.Position.Z - 2) then
+				if z >= 270 and z < 425 then
 					setCp(player, "B")
 				end
-				if cpC and z >= (cpC.Position.Z - 2) then
+				if z >= 425 and z < 555 then
 					setCp(player, "C")
+				end
+				if z >= 555 then
+					setCp(player, "D")
 				end
 			end
 		end
