@@ -308,6 +308,9 @@ local function grantSwordInstance(player)
 	end
 
 	tool.Parent = backpack
+	if _G.TrialSpell and type(_G.TrialSpell.orderHotbar) == "function" then
+		_G.TrialSpell.orderHotbar(player)
+	end
 	return true
 end
 
