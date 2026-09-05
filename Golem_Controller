@@ -9,10 +9,13 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
+-- AttackDamage (dealt to the player) and SwordDamage (taken per sword hit) are
+-- both optional. Golems without them use PLAYER_ATTACK_DAMAGE and the shared
+-- 15%-of-max-health sword scaling in Player_Attacks.
 local GOLEM_STATS = {
 	SkeliGolem = { MaxHealth = 200 },
 	GreenGolem = { MaxHealth = 200 },
-	StoneGolem = { MaxHealth = 300 },
+	StoneGolem = { MaxHealth = 500, AttackDamage = 22.5, SwordDamage = 45 },
 }
 
 -- Published animation IDs only (per golem). Do not reference unpublished assets.
@@ -40,6 +43,12 @@ local GOLEM_ANIMS = {
 }
 
 local PLAYER_ATTACK_DAMAGE = 15
+
+local function getAttackDamage(golemName)
+	local stats = GOLEM_STATS[golemName]
+	return (stats and stats.AttackDamage) or PLAYER_ATTACK_DAMAGE
+end
+
 local WALK_SPEED = 12
 local ATTACK_RANGE = 5.5
 local ATTACK_COOLDOWN = 1.2
@@ -1451,9 +1460,10 @@ local function spawnController(golem, golemType, animCache)
 							if targetHum and targetHum.Health > 0 and tRoot then
 								local currentDist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(tRoot.Position.X, 0, tRoot.Position.Z)).Magnitude
 								if currentDist <= ATTACK_RANGE + 2 then
-									targetHum:TakeDamage(PLAYER_ATTACK_DAMAGE)
+									local attackDamage = getAttackDamage(golemType)
+									targetHum:TakeDamage(attackDamage)
 									print("[ROOM B COMBAT] " .. golemType .. " attack damage applied")
-									print("[ROOM B COMBAT] " .. golemType .. " attack HIT player (" .. PLAYER_ATTACK_DAMAGE .. " dmg)")
+									print("[ROOM B COMBAT] " .. golemType .. " attack HIT player (" .. attackDamage .. " dmg)")
 								else
 									print("[ROOM B COMBAT] " .. golemType .. " attack MISSED player (distance: " .. string.format("%.1f", currentDist) .. ")")
 								end
@@ -1562,6 +1572,7 @@ local function spawnSingleGolemImpl(golemName, preferredSpawnNames)
 	local maxHealth = stats.MaxHealth
 	newGolem:SetAttribute("MaxHealth", maxHealth)
 	newGolem:SetAttribute("Health", maxHealth)
+	newGolem:SetAttribute("SwordDamage", stats.SwordDamage)
 
 	createHealthBar(newGolem, root, golemName, maxHealth)
 
