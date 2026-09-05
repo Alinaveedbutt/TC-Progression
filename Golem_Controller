@@ -1281,6 +1281,14 @@ local function spawnController(golem, golemType, animCache)
 			local track = animCtrl.request("Death")
 			if track then
 				waitForDeathAnimation(track)
+				-- Hold the last death frame so the body stays down instead of snapping back.
+				pcall(function()
+					if track.Length and track.Length > 0 then
+						track:Play(0)
+						track.TimePosition = math.max(0, track.Length - 0.05)
+					end
+					track:AdjustSpeed(0)
+				end)
 			end
 			clearGolemAnimCache(golem)
 			currentState = "Dead"
@@ -1313,8 +1321,19 @@ local function spawnController(golem, golemType, animCache)
 				checkRoomBCompletion()
 			end
 
+			-- Leave the body on the floor. Freeze collision/anchors in the death pose.
 			if golem and golem.Parent then
-				golem:Destroy()
+				golem:SetAttribute("IsCorpse", true)
+				golem:SetAttribute("IsActive", false)
+				local corpseRoot = resolveRoot(golem)
+				if corpseRoot then
+					applyGolemCollisionSetup(golem, corpseRoot, false)
+					local bar = corpseRoot:FindFirstChild("HealthBar")
+					if bar then
+						bar:Destroy()
+					end
+				end
+				print("[ROOM B GOLEMS] " .. golemType .. " corpse left in place")
 			end
 		end)
 	end
@@ -1707,7 +1726,7 @@ task.defer(function()
 		"Room_C_Motes",
 		"TrialChamberSpellBridge",
 		"RoomC_Attack_Spell",
-	}) do
+		}) do
 		local inst = sss:FindFirstChild(name)
 		if inst and inst:IsA("ModuleScript") then
 			pcall(require, inst)
