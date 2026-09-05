@@ -202,7 +202,11 @@ local function bindSwordCombat(tool, blade, player)
 								swingDamagedGolems[model] = true
 
 								local maxHealth = model:GetAttribute("MaxHealth") or 200
-								local damage = maxHealth * DAMAGE_FRACTION
+								-- Optional per-golem absolute damage, so raising a golem's max
+								-- health actually makes it tankier instead of scaling the hit
+								-- up alongside it and keeping the fight the same length.
+								local damage = model:GetAttribute("SwordDamage")
+									or (maxHealth * DAMAGE_FRACTION)
 								local newHealth = math.max(0, currentHealth - damage)
 								model:SetAttribute("Health", newHealth)
 
