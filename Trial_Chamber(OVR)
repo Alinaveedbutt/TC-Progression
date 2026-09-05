@@ -4813,20 +4813,15 @@ local function setupRoomCheckpointTracking(root)
 		for _, player in ipairs(Players:GetPlayers()) do
 			local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 			if hrp then
-				-- Use chamber-local Z so rotation/pivot cannot send Room D deaths back to C.
-				local localPos = root:GetPivot():PointToObjectSpace(hrp.Position)
-				local z = localPos.Z
-				if z >= -10 and z < 270 then
-					setCp(player, "A")
-				end
-				if z >= 270 and z < 425 then
-					setCp(player, "B")
-				end
-				if z >= 425 and z < 555 then
-					setCp(player, "C")
-				end
-				if z >= 555 then
-					setCp(player, "D")
+				-- Room bounds come from TrialChamberRespawn, which derives them from the
+				-- live chamber. The old hardcoded Z thresholds did not match this layout
+				-- and filed Room C/D positions as Room A/B.
+				local respawn = _G.TrialChamberRespawn
+				local room = respawn
+					and respawn.inferRoomFromPosition
+					and respawn.inferRoomFromPosition(hrp.Position)
+				if room then
+					setCp(player, room)
 				end
 			end
 		end
