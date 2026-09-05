@@ -288,6 +288,82 @@ local function applyMoteVisualWeakness(orb)
 	end
 end
 
+------------------------------------------------------------------------
+-- Shared mote health bar: one bar above the Heart showing the combined
+-- durability of every mote, styled to match the Room B golem bars.
+------------------------------------------------------------------------
+local MOTE_BAR_NAME = "MoteHealthBar"
+
+local function createMoteHealthBar(state)
+	local adornee = state.crystal
+	if not adornee then
+		return
+	end
+
+	local existing = adornee:FindFirstChild(MOTE_BAR_NAME)
+	if existing then
+		existing:Destroy()
+	end
+
+	local bar = Instance.new("BillboardGui")
+	bar.Name = MOTE_BAR_NAME
+	bar.Size = UDim2.new(10, 0, 1.1, 0)
+	bar.StudsOffset = Vector3.new(0, math.max(14, adornee.Size.Y * 0.6 + 10), 0)
+	bar.AlwaysOnTop = true
+	bar.MaxDistance = 250
+	bar.Adornee = adornee
+	bar.Parent = adornee
+
+	local background = Instance.new("Frame")
+	background.Name = "Background"
+	background.Size = UDim2.new(1, 0, 1, 0)
+	background.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+	background.BorderSizePixel = 0
+	background.Parent = bar
+
+	local fill = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.Size = UDim2.new(1, 0, 1, 0)
+	fill.BackgroundColor3 = Color3.fromRGB(90, 180, 255)
+	fill.BorderSizePixel = 0
+	fill.Parent = background
+
+	local text = Instance.new("TextLabel")
+	text.Name = "MoteHealthText"
+	text.Size = UDim2.new(1, 0, 1, 0)
+	text.BackgroundTransparency = 1
+	text.TextColor3 = Color3.new(1, 1, 1)
+	text.TextScaled = true
+	text.Font = Enum.Font.GothamBold
+	text.Text = "MOTES"
+	text.Parent = background
+
+	state.moteBar = bar
+	state.moteBarFill = fill
+	state.moteBarText = text
+end
+
+local function updateMoteHealthBar(state)
+	if not (state and state.moteBar and state.moteBar.Parent) then
+		return
+	end
+
+	local remaining = 0
+	for orb, moteState in pairs(state.motes) do
+		if moteState.alive and orb.Parent and orb:GetAttribute("Dissolved") ~= true then
+			remaining += (getRemainingDurability(orb))
+		end
+	end
+
+	local maxTotal = math.max(state.moteBarMaxTotal or 0, 1)
+	local ratio = math.clamp(remaining / maxTotal, 0, 1)
+
+	state.moteBarFill.Size = UDim2.new(ratio, 0, 1, 0)
+	state.moteBarFill.BackgroundColor3 = Color3.fromRGB(220, 70, 70):Lerp(Color3.fromRGB(90, 180, 255), ratio)
+	state.moteBarText.Text = string.format("MOTES  %d / %d", math.floor(remaining + 0.5), maxTotal)
+	state.moteBar.Enabled = remaining > 0
+end
+
 local unlockHeart
 local lockHeart
 local tryUnlockHeart
@@ -414,6 +490,7 @@ local function dissolveMote(state, orb)
 		if state.motesRemaining ~= nil then
 			state.motesRemaining = math.max(0, state.motesRemaining - 1)
 		end
+		updateMoteHealthBar(state)
 	end
 
 	orb.CanTouch = false
@@ -764,6 +841,7 @@ local function applyMoteSpellHit(mote, player, amount)
 	print("[ROOM C MOTES] Durability: " .. tostring(prevRemaining) .. " -> " .. tostring(newRemaining))
 
 	applyMoteVisualWeakness(mote)
+	updateMoteHealthBar(state)
 
 	-- At 0 HP: destroy immediately (do not leave a black orb behind).
 	if newRemaining <= 0 or newDamage >= maxW then
@@ -892,6 +970,9 @@ local function start(dais, opts)
 	end
 
 	state.motesRemaining = #moteList
+	state.moteBarMaxTotal = #moteList * CONFIG.MAX_WEAKNESS
+	createMoteHealthBar(state)
+	updateMoteHealthBar(state)
 
 	-- Heart locked until all motes dissolve (server-side)
 	if state.motesRemaining <= 0 then
