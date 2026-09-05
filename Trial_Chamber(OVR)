@@ -1881,17 +1881,35 @@ function RoomC.build(parent)
 			cameraShakeRemote = roomCCameraShakeRemote,
 		}
 
-		local encounter = _G.RoomCMoteEncounter
-		if not encounter then
+		local function resolveEncounter()
+			if typeof(_G.RoomCMoteEncounter) == "table" and type(_G.RoomCMoteEncounter.start) == "function" then
+				return _G.RoomCMoteEncounter
+			end
 			local sss = game:GetService("ServerScriptService")
-			local mod = sss:FindFirstChild("RoomCMoteEncounter")
-				or sss:FindFirstChild("Room_C_Motes")
-			if mod and mod:IsA("ModuleScript") then
-				local ok, result = pcall(require, mod)
-				if ok then
-					encounter = result
-				else
-					warn("[ROOM C] Failed to require RoomCMoteEncounter: " .. tostring(result))
+			for _, name in ipairs({ "RoomCMoteEncounter", "Room_C_Motes" }) do
+				local inst = sss:FindFirstChild(name)
+				if inst and inst:IsA("ModuleScript") then
+					local ok, result = pcall(require, inst)
+					if ok and type(result) == "table" and type(result.start) == "function" then
+						_G.RoomCMoteEncounter = result
+						return result
+					elseif not ok then
+						warn("[ROOM C] Failed to require " .. name .. ": " .. tostring(result))
+					end
+				end
+			end
+			return nil
+		end
+
+		-- Chamber generation is synchronous and can finish before Room_C_Motes
+		-- (a Script) assigns _G.RoomCMoteEncounter. Wait here — this runs in task.spawn.
+		local encounter = resolveEncounter()
+		if not encounter then
+			for _ = 1, 40 do
+				task.wait(0.05)
+				encounter = resolveEncounter()
+				if encounter then
+					break
 				end
 			end
 		end
